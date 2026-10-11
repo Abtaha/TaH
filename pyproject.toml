@@ -84,6 +84,13 @@ target-version = ["py310"]
 profile = "black"
 line_length = 100
 
+[tool.pytest.ini_options]
+markers = [
+    "gpu: requires an available CUDA GPU",
+    "slow: production fixture replay or other long validation",
+]
+addopts = "-m 'not slow'"
+
 [tool.setuptools.packages.find]
 include = ["tah", "tah.*", "tah2", "tah2.*"]
 
