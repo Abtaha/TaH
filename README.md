@@ -227,7 +227,22 @@ For training and evaluation, install additional dependencies:
 pip install -e '.[tah,training,evaluation]'
 ```
 
-For code generation evaluation, install [evalplus](https://github.com/evalplus/evalplus)
+The TaH inference engine uses FlashInfer and Triton. Install it with the evaluation
+dependencies using:
+
+```bash
+pip install -e '.[tah,evaluation,engine]'
+```
+
+Engine inference requires Linux, an NVIDIA GPU with compute capability 8.0 or newer,
+and an NVIDIA driver supported by the installed PyTorch CUDA build. FlashInfer's PyPI
+package compiles kernels on first use, so a CUDA Toolkit with the same CUDA major version
+as PyTorch and `nvcc` on `PATH`
+or configured through `CUDA_HOME` is also required. Importing `tah.engine` checks these
+requirements and reports setup guidance when one is missing. Runtime JIT compilation
+also needs Python development headers matching the active interpreter (for example,
+`python3.10-devel` on Fedora or `python3.10-dev` on Debian/Ubuntu). Evaluation installs
+`evalplus` according to the `evaluation` extra in `pyproject.toml`.
 
 > **Note** if you ``git pull`` and the top-level package layout changes
 > (e.g. ``__init__.py`` is added or removed), re-run ``pip install -e '.[tah]'``
