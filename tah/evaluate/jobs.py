@@ -22,11 +22,11 @@ import ctypes
 import fcntl
 import json
 import logging as pylog
-import math
 import os
 import shutil
 import signal
 import socket
+import threading
 import time
 import traceback
 from multiprocessing import Process, Queue
@@ -49,8 +49,10 @@ mp.set_start_method("spawn", force=True)
 _CSV_FIELDS = (
     "problem_id", "sample_idx", "correct_answer", "predicted_answer",
     "has_answer", "is_correct", "input_tokens", "output_tokens", "processing_time",
+    "mean_passes_per_token", "fraction_tokens_at_least_2_passes", "pass_stat_tokens",
 )
-_CODE_ANSWER_TYPES = frozenset({"livecodebench", "humaneval", "mbpp"})
+_CODE_ANSWER_TYPES = frozenset({"humaneval", "mbpp"})
+_UNSUPPORTED_CODE_DATASETS = {"livecodebench": "LiveCodeBench has no grader in this repository."}
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -67,6 +69,8 @@ def _build_problem(item: dict, idx: int, field_mapping: Dict, detail_dir: Path) 
     problem_dir.mkdir(parents=True, exist_ok=True)
     return {
         "problem_id": pid,
+        "dataset_name": item.get("_source_dataset", field_mapping.get("dataset_names", [""])[0]),
+        "answer_type": item.get("_source_answer_type", field_mapping.get("answer_type", "boxed")),
         "original_problem_id": item.get("_original_id", pid),
         "problem_text": text,
         "correct_answer": answer,
@@ -114,14 +118,19 @@ def _append_code_solution(path: Path, task_id: str, code: str) -> None:
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def _job_output_dir(output_dir: str, combined_dataset_name: str, backend: str,
-                    timestamp: str, job_id: int, data_range) -> Path:
-    """``<output_dir>/<dataset>_<backend>/<ts>[/TASK_a_b]/job_<id>/``."""
-    out = Path(output_dir) / f"{combined_dataset_name}_{backend}" / timestamp
+def _dataset_run_dir(output_dir: str, dataset_name: str, backend: str,
+                     timestamp: str, data_range=None) -> Path:
+    """Return the current per-dataset output directory for this run."""
+    out = Path(output_dir) / f"{dataset_name}_{backend}" / timestamp
     if data_range:
         a, b = parse_data_range(data_range)
         out = out / f"TASK_{a}_{b}"
-    return out / f"job_{job_id}"
+    return out
+
+
+def _job_output_dir(output_dir: str, dataset_name: str, backend: str,
+                    timestamp: str, job_id: int, data_range=None) -> Path:
+    return _dataset_run_dir(output_dir, dataset_name, backend, timestamp, data_range) / f"job_{job_id}"
 
 
 def _build_prompts(
@@ -139,110 +148,190 @@ def _build_prompts(
     return prompts, prompt_to_problem
 
 
-def _process_batch(
-    batch_outputs: List[Tuple[str, float]],
-    batch_offset: int,
-    prompts: List[str],
+def _normalise_inference_result(result) -> Tuple[str, float, Optional[List[int]]]:
+    """Accept the legacy ``(text, seconds)`` and optional pass-count result."""
+    if isinstance(result, dict):
+        text = result["text"]
+        elapsed = result.get("processing_time", result.get("seconds", 0.0))
+        pass_counts = result.get("pass_counts")
+    else:
+        if len(result) < 2:
+            raise ValueError(f"backend result must contain text and elapsed seconds, got {result!r}")
+        text, elapsed = result[0], result[1]
+        pass_counts = result[2] if len(result) > 2 else None
+    if pass_counts is not None:
+        pass_counts = [int(n) for n in pass_counts]
+    return str(text), float(elapsed), pass_counts
+
+
+def _pass_summary(pass_counts: Optional[List[int]]) -> Tuple[str, str, int]:
+    if not pass_counts:
+        return "", "", 0
+    n = len(pass_counts)
+    return f"{sum(pass_counts) / n:.6f}", f"{sum(v >= 2 for v in pass_counts) / n:.6f}", n
+
+
+def _process_result(
+    prompt_idx: int,
+    backend_result,
     prompt_to_problem: List[Tuple[int, int]],
     problems: List[dict],
     tokenizer,
-    *,
-    combined_dataset_name: str,
-    is_code: bool,
-    unified_code_solutions_file: Optional[Path],
-    writer,
-    all_results: List[dict],
+    writers: Dict[str, Tuple[object, csv.DictWriter]],
+    all_results: Dict[str, List[dict]],
 ) -> None:
-    """For each (text, time) in ``batch_outputs``, score it, write the
-    per-sample json under the problem's dir, append a row to the open CSV
-    writer + the in-memory ``all_results`` list."""
-    for j, (output_text, proc_time) in enumerate(batch_outputs):
-        pi, sample_idx = prompt_to_problem[batch_offset + j]
-        p = problems[pi]
-        pred, has_ans, ok = _score_one(output_text, p["correct_answer"], combined_dataset_name, is_code=is_code)
+    """Grade and persist a single result, safe to call from a backend callback."""
+    output_text, proc_time, pass_counts = _normalise_inference_result(backend_result)
+    pi, sample_idx = prompt_to_problem[prompt_idx]
+    p = problems[pi]
+    dataset_name = p["dataset_name"]
+    is_code = p["answer_type"] in _CODE_ANSWER_TYPES
+    pred, has_ans, ok = _score_one(output_text, p["correct_answer"], dataset_name, is_code=is_code)
+    detail = {
+        "problem_id": p["problem_id"],
+        "problem": p["problem_text"],
+        "output": output_text,
+        "correct_answer": p["correct_answer"],
+        "predicted_answer": pred,
+        "is_correct": ok,
+    }
+    if is_code:
+        extracted = codeeval.sanitize(output_text, p["entry_point"])
+        detail["extracted_code"] = extracted
+        detail["entry_point"] = p["entry_point"]
+        _append_code_solution(p["output_dir"] / "code_solutions.jsonl", p["original_problem_id"], extracted)
 
-        detail = {
-            "problem": p["problem_text"],
-            "output": output_text,
-            "correct_answer": p["correct_answer"],
-            "predicted_answer": pred,
-            "is_correct": ok,
-        }
-        if is_code:
-            extracted = codeeval.sanitize(output_text, p["entry_point"])
-            detail["extracted_code"] = extracted
-            detail["entry_point"] = p["entry_point"]
-            if unified_code_solutions_file is not None:
-                _append_code_solution(unified_code_solutions_file, p["original_problem_id"], extracted)
-        with open(p["problem_dir"] / f"sample_{sample_idx}.json", "w", encoding="utf-8") as fd:
-            json.dump(detail, fd, ensure_ascii=False, indent=2)
+    mean_passes, frac_two_plus, pass_tokens = _pass_summary(pass_counts)
+    if pass_counts is not None:
+        detail["mean_passes_per_token"] = float(mean_passes) if pass_counts else None
+        detail["fraction_tokens_at_least_2_passes"] = float(frac_two_plus) if pass_counts else None
+        detail["pass_stat_tokens"] = pass_tokens
+    sample_path = p["problem_dir"] / f"sample_{sample_idx}.json"
+    tmp_path = sample_path.with_suffix(".json.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as fd:
+        json.dump(detail, fd, ensure_ascii=False, indent=2)
+        fd.flush()
+        os.fsync(fd.fileno())
+    os.replace(tmp_path, sample_path)
 
-        row = {
-            "problem_id": p["problem_id"],
-            "sample_idx": sample_idx,
-            "correct_answer": p["correct_answer"],
-            "predicted_answer": pred,
-            "has_answer": has_ans,
-            "is_correct": ok,
-            "input_tokens": len(tokenizer.encode(p["problem_text"])),
-            "output_tokens": len(tokenizer.encode(output_text)),
-            "processing_time": proc_time,
-        }
-        writer.writerow(row)
-        all_results.append(row)
+    row = {
+        "problem_id": p["problem_id"],
+        "sample_idx": sample_idx,
+        "correct_answer": p["correct_answer"],
+        "predicted_answer": pred,
+        "has_answer": has_ans,
+        "is_correct": ok,
+        "input_tokens": len(tokenizer.encode(p["problem_text"])),
+        "output_tokens": len(tokenizer.encode(output_text)),
+        "processing_time": proc_time,
+        "mean_passes_per_token": mean_passes,
+        "fraction_tokens_at_least_2_passes": frac_two_plus,
+        "pass_stat_tokens": pass_tokens,
+    }
+    csv_file, writer = writers[dataset_name]
+    writer.writerow(row)
+    csv_file.flush()
+    all_results[dataset_name].append(row)
 
 
 def run_single_job(
     *, config: Dict, combined_dataset_name: str, output_dir: str, timestamp: str,
     model_path: str, job_id: int, job_nums: int, start_idx: int, end_idx: int,
     tp_size: int, backend: str, data_range, problems_data, field_mapping: Dict,
-    unified_code_solutions_file: Optional[Path],
+    unified_code_solutions_file: Optional[Path] = None, dataset_names=None,
+    dataset_ranges=None,
 ) -> None:
-    """Run inference for one job (one process) and write per-problem files."""
+    """Run one backend instance for this job and write each dataset separately."""
     from transformers import AutoTokenizer
 
-    out = _job_output_dir(output_dir, combined_dataset_name, backend, timestamp, job_id, data_range)
-    detail_dir = out / "details"
-    detail_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Job {job_id+1}/{job_nums}: {len(problems_data)} problems, backend={backend}, datasets={combined_dataset_name}")
+    dataset_names = dataset_names or field_mapping.get("dataset_names") or [combined_dataset_name]
+    dataset_ranges = dataset_ranges or {}
+    print(f"Job {job_id+1}/{job_nums}: {len(problems_data)} problems, backend={backend}, datasets={dataset_names}")
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     model, infer = setup_backend(backend, config, model_path, tokenizer, tp_size=tp_size)
 
-    is_code = field_mapping.get("answer_type", "boxed") in _CODE_ANSWER_TYPES
-    problems = [
-        _build_problem(item, item.get("_original_index", start_idx + i), field_mapping, detail_dir)
-        for i, item in enumerate(problems_data)
-    ]
-    prompts, prompt_to_problem = _build_prompts(problems, tokenizer, config["repeat_size"], is_code)
+    problems = []
+    for i, item in enumerate(problems_data):
+        ds_name = item.get("_source_dataset", dataset_names[0])
+        ds_type = item.get("_source_answer_type", field_mapping.get("answer_types_by_dataset", {}).get(ds_name, field_mapping.get("answer_type", "boxed")))
+        item_mapping = dict(field_mapping)
+        item_mapping["answer_type"] = ds_type
+        item_mapping["dataset_names"] = [ds_name]
+        ds_out = _dataset_run_dir(output_dir, ds_name, backend, timestamp, dataset_ranges.get(ds_name))
+        job_out = ds_out / f"job_{job_id}"
+        (job_out / "details").mkdir(parents=True, exist_ok=True)
+        problem = _build_problem(item, item.get("_original_index", start_idx + i), item_mapping, job_out / "details")
+        problem["output_dir"] = ds_out
+        problems.append(problem)
+
+    prompts: List[str] = []
+    prompt_to_problem: List[Tuple[int, int]] = []
+    for pi, problem in enumerate(problems):
+        rendered = _make_prompt(problem["problem_text"], tokenizer, is_code=problem["answer_type"] in _CODE_ANSWER_TYPES)
+        for sample_idx in range(config["repeat_size"]):
+            prompts.append(rendered)
+            prompt_to_problem.append((pi, sample_idx))
     print(f"Processing batch_size={config['batch_size']} repeat_size={config['repeat_size']} → {len(prompts)} prompts")
 
-    results_file = out / "detailed_results.csv"
-    with open(results_file, "w", newline="", encoding="utf-8") as f:
-        csv.DictWriter(f, fieldnames=_CSV_FIELDS).writeheader()
-
-    all_results: List[dict] = []
-    bs = config["batch_size"]
-    for bi in tqdm(range(math.ceil(len(prompts) / bs)),
-                   desc=f"Job {job_id} batches", position=job_id, leave=True):
-        s, e = bi * bs, min((bi + 1) * bs, len(prompts))
-        batch_outputs = infer(prompts[s:e])
-        with open(results_file, "a", newline="", encoding="utf-8") as f:
+    writers: Dict[str, Tuple[object, csv.DictWriter]] = {}
+    all_results: Dict[str, List[dict]] = {name: [] for name in dataset_names}
+    for ds_name in dataset_names:
+        if any(p["dataset_name"] == ds_name for p in problems):
+            job_out = _job_output_dir(output_dir, ds_name, backend, timestamp, job_id, dataset_ranges.get(ds_name))
+            f = open(job_out / "detailed_results.csv", "w", newline="", encoding="utf-8")
             writer = csv.DictWriter(f, fieldnames=_CSV_FIELDS)
-            _process_batch(
-                batch_outputs, batch_offset=s,
-                prompts=prompts, prompt_to_problem=prompt_to_problem,
-                problems=problems, tokenizer=tokenizer,
-                combined_dataset_name=combined_dataset_name, is_code=is_code,
-                unified_code_solutions_file=unified_code_solutions_file,
-                writer=writer, all_results=all_results,
-            )
+            writer.writeheader()
+            f.flush()
+            writers[ds_name] = (f, writer)
 
-    _write_job_stats(out, all_results)
-    print(f"Job {job_id} done; accuracy={_overall_accuracy(all_results):.4f}")
-    cleanup(model, backend)
+    try:
+        if getattr(infer, "supports_callback", False):
+            callback_lock = threading.Lock()
+            seen_results = set()
+
+            def on_result(index, result):
+                index = int(index)
+                if not 0 <= index < len(prompts):
+                    raise IndexError(f"backend callback prompt index {index} outside 0..{len(prompts)-1}")
+                with callback_lock:
+                    if index in seen_results:
+                        raise ValueError(f"backend reported prompt {index} more than once")
+                    _process_result(index, result, prompt_to_problem, problems, tokenizer, writers, all_results)
+                    seen_results.add(index)
+
+            infer(prompts, on_result=on_result)
+            missing = len(prompts) - len(seen_results)
+            if missing:
+                raise RuntimeError(f"callback backend returned without reporting {missing} of {len(prompts)} prompts")
+        else:
+            bs = config["batch_size"]
+            inference_batches = []
+            for ds_name in dataset_names:
+                indexes = [i for i, (pi, _) in enumerate(prompt_to_problem)
+                           if problems[pi]["dataset_name"] == ds_name]
+                for start in range(0, len(indexes), bs):
+                    inference_batches.append(indexes[start:start + bs])
+            for indexes in tqdm(inference_batches,
+                                desc=f"Job {job_id} batches", position=job_id, leave=True):
+                batch_outputs = infer([prompts[i] for i in indexes])
+                if len(batch_outputs) != len(indexes):
+                    raise ValueError(f"backend returned {len(batch_outputs)} outputs for {len(indexes)} prompts")
+                for prompt_idx, result in zip(indexes, batch_outputs):
+                    _process_result(prompt_idx, result, prompt_to_problem, problems, tokenizer, writers, all_results)
+        for ds_name, rows in all_results.items():
+            if rows:
+                _write_job_stats(_job_output_dir(output_dir, ds_name, backend, timestamp, job_id,
+                                                 dataset_ranges.get(ds_name)), rows)
+    finally:
+        for f, _ in writers.values():
+            f.close()
+        cleanup(model, backend)
+    for ds_name, rows in all_results.items():
+        if rows:
+            print(f"Job {job_id} done for {ds_name}; accuracy={_overall_accuracy(rows):.4f}")
 
 
 def _overall_accuracy(rows: List[dict]) -> float:
@@ -260,19 +349,43 @@ def _write_job_stats(out: Path, all_results: List[dict]) -> None:
         n = len(rs)
         c = sum(1 for r in rs if r["is_correct"])
         avg_out = sum(r["output_tokens"] for r in rs) / n if n else 0.0
-        rows.append((pid, c / n if n else 0.0, c, n, avg_out))
+        mean_pass = _weighted_field(rs, "mean_passes_per_token", "pass_stat_tokens")
+        frac_two = _weighted_field(rs, "fraction_tokens_at_least_2_passes", "pass_stat_tokens")
+        stat_n = sum(int(r.get("pass_stat_tokens") or 0) for r in rs)
+        rows.append((pid, c / n if n else 0.0, c, n, avg_out, mean_pass, frac_two, stat_n))
 
     total_n = len(all_results)
     total_c = sum(1 for r in all_results if r["is_correct"])
     total_avg_out = sum(r["output_tokens"] for r in all_results) / total_n if total_n else 0.0
+    total_mean_pass = _weighted_field(all_results, "mean_passes_per_token", "pass_stat_tokens")
+    total_frac_two = _weighted_field(all_results, "fraction_tokens_at_least_2_passes", "pass_stat_tokens")
+    total_pass_tokens = sum(int(r.get("pass_stat_tokens") or 0) for r in all_results)
 
     with open(out / "evaluation_stats.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["problem_id", "accuracy", "correct_count", "total_samples", "avg_output_length"])
-        for pid, acc, c, n, avg in rows:
-            w.writerow([pid, f"{acc:.3f}", c, n, f"{avg:.2f}"])
+        w.writerow(["problem_id", "accuracy", "correct_count", "total_samples", "avg_output_length",
+                    "mean_passes_per_token", "fraction_tokens_at_least_2_passes", "pass_stat_tokens"])
+        for pid, acc, c, n, avg, mean_pass, frac_two, stat_n in rows:
+            w.writerow([pid, f"{acc:.3f}", c, n, f"{avg:.2f}", _fmt_optional(mean_pass),
+                        _fmt_optional(frac_two), stat_n])
         w.writerow([])
-        w.writerow(["Total Accuracy", f"{(total_c/total_n if total_n else 0):.3f}", total_c, total_n, f"{total_avg_out:.2f}"])
+        w.writerow(["Total Accuracy", f"{(total_c/total_n if total_n else 0):.3f}", total_c, total_n,
+                    f"{total_avg_out:.2f}", _fmt_optional(total_mean_pass), _fmt_optional(total_frac_two),
+                    total_pass_tokens])
+
+
+def _weighted_field(rows: List[dict], value_field: str, weight_field: str) -> Optional[float]:
+    weighted = [
+        (float(r[value_field]), int(r.get(weight_field) or 0))
+        for r in rows
+        if r.get(value_field) not in (None, "") and int(r.get(weight_field) or 0) > 0
+    ]
+    total_weight = sum(weight for _, weight in weighted)
+    return sum(value * weight for value, weight in weighted) / total_weight if total_weight else None
+
+
+def _fmt_optional(value: Optional[float]) -> str:
+    return "" if value is None else f"{value:.6f}"
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -322,9 +435,9 @@ def _install_pdeathsig() -> None:
 def _run_job_process(job_args: Tuple, result_queue: Queue) -> None:
     """One job per Process; pins CUDA_VISIBLE_DEVICES + NCCL port for the worker."""
     _install_pdeathsig()
-    (job_id, config, combined_dataset_name, output_dir, timestamp, model_path,
-     job_nums, start_idx, end_idx, tp_size, backend, data_range, gpu_devices,
-     problems_data, field_mapping, unified_code_solutions_file) = job_args
+    (job_id, config, dataset_names, output_dir, timestamp, model_path,
+     job_nums, start_idx, end_idx, tp_size, backend, dataset_ranges, gpu_devices,
+     problems_data, field_mapping) = job_args
 
     _setup_logging(config.get("_logger_level") or "WARNING")
 
@@ -343,12 +456,11 @@ def _run_job_process(job_args: Tuple, result_queue: Queue) -> None:
     try:
         print(f"\nJob {job_id}: GPUs={gpu_devices}, NCCL port={port}, indices {start_idx}..{end_idx-1}")
         run_single_job(
-            config=config, combined_dataset_name=combined_dataset_name,
+            config=config, combined_dataset_name="_".join(dataset_names), dataset_names=dataset_names,
             output_dir=output_dir, timestamp=timestamp, model_path=model_path,
             job_id=job_id, job_nums=job_nums, start_idx=start_idx, end_idx=end_idx,
-            tp_size=tp_size, backend=backend, data_range=data_range,
+            tp_size=tp_size, backend=backend, data_range=None, dataset_ranges=dataset_ranges,
             problems_data=problems_data, field_mapping=field_mapping,
-            unified_code_solutions_file=unified_code_solutions_file,
         )
         result_queue.put((job_id, True, "ok"))
     except Exception as e:
@@ -380,45 +492,89 @@ def parse_data_range(data_range_list, total_problems: Optional[int] = None) -> T
     return s, e
 
 
-def _select_problems(args, dataset: List[dict]) -> List:
-    """Resolve --data_ids or --data_range into a list of items / indices to evaluate."""
+def parse_dataset_ranges(value: Optional[str], dataset_names: List[str]) -> Dict[str, Optional[Tuple[int, int]]]:
+    """Parse ``dataset=start:end,dataset=all`` range overrides."""
+    ranges: Dict[str, Optional[Tuple[int, int]]] = {}
+    if not value:
+        return ranges
+    for term in value.split(","):
+        term = term.strip()
+        if not term:
+            continue
+        if "=" not in term:
+            raise ValueError(f"invalid --dataset_ranges entry {term!r}; use dataset=start:end or dataset=all")
+        name, spec = (part.strip() for part in term.split("=", 1))
+        if name not in dataset_names:
+            raise ValueError(f"--dataset_ranges names {name!r}, which is not in --dataset_name {dataset_names}")
+        if name in ranges:
+            raise ValueError(f"duplicate --dataset_ranges entry for {name!r}")
+        if spec.lower() == "all":
+            ranges[name] = None
+            continue
+        try:
+            start, end = (int(part) for part in spec.split(":"))
+        except Exception as e:
+            raise ValueError(f"invalid range {spec!r} for {name}; expected start:end or all") from e
+        if start < 0 or end <= start:
+            raise ValueError(f"invalid range for {name}: start={start}, end={end}")
+        ranges[name] = (start, end)
+    return ranges
+
+
+def _select_problems(args, dataset: List[dict], dataset_names=None) -> Tuple[List[dict], Dict[str, Optional[Tuple[int, int]]]]:
+    """Select each dataset's range independently and return tagged items."""
+    dataset_names = dataset_names or list(dict.fromkeys(item.get("_source_dataset", "") for item in dataset))
+    explicit = parse_dataset_ranges(getattr(args, "dataset_ranges", None), dataset_names)
+    ranges: Dict[str, Optional[Tuple[int, int]]] = {}
     if getattr(args, "data_ids", None):
-        valid_ids = {str(item.get("id")) for item in dataset}
-        seen, out = set(), []
+        by_id = {str(item.get("id")): item for item in dataset}
+        out = []
+        seen = set()
         for pid in (s.strip() for s in str(args.data_ids).split(",") if s.strip()):
-            if pid in valid_ids and pid not in seen:
+            if pid in by_id and pid not in seen:
+                item = dict(by_id[pid])
+                item["_original_index"] = int(item.get("_original_index", 0))
+                out.append(item)
                 seen.add(pid)
-                out.append(pid)
         if not out:
             raise ValueError("--data_ids matched no problem IDs (use <dataset>_<original_id>)")
-        return out
-    a, b = parse_data_range(args.data_range, len(dataset))
-    return list(range(a, b))
+        ranges.update({name: None for name in dataset_names})
+        return out, ranges
+
+    selected: List[dict] = []
+    for name in dataset_names:
+        items = [item for item in dataset if item.get("_source_dataset") == name]
+        local_range = explicit[name] if name in explicit else getattr(args, "data_range", None)
+        if local_range is None:
+            ranges[name] = None
+            indexes = range(len(items))
+        else:
+            start, end = parse_data_range(local_range, len(items))
+            ranges[name] = (start, end)
+            indexes = range(start, end)
+        for local_idx in indexes:
+            item = dict(items[local_idx])
+            item["_original_index"] = local_idx
+            selected.append(item)
+    if not selected:
+        raise ValueError("the selected dataset ranges contain no problems")
+    return selected, ranges
 
 
-def _build_job_args(args, dataset, selected, eval_config, combined_dataset_name, timestamp,
-                    available_gpus, gpus_per_job, field_mapping, unified_code_solutions_file):
-    """Materialise per-job tuples for _run_job_process. Splits ``selected`` interleaved across jobs."""
-    by_id = {str(item.get("id")): item for item in dataset} if getattr(args, "data_ids", None) else None
+def _build_job_args(args, selected, eval_config, dataset_names, timestamp,
+                    available_gpus, gpus_per_job, field_mapping, dataset_ranges):
+    """Materialise jobs; each job loads one backend and handles all its datasets."""
     job_args_list = []
     for job_id in range(args.job_nums):
-        slice_ = selected[job_id::args.job_nums]
-        if not slice_:
+        job_problems = selected[job_id::args.job_nums]
+        if not job_problems:
             continue
         gpu_start = job_id * gpus_per_job
         job_gpus = available_gpus[gpu_start:gpu_start + gpus_per_job]
-        if by_id is not None:
-            job_problems = [by_id[str(p)] for p in slice_ if str(p) in by_id]
-        else:
-            job_problems = []
-            for i in slice_:
-                item = dict(dataset[i])
-                item["_original_index"] = i
-                job_problems.append(item)
         job_args_list.append((
-            job_id, eval_config, combined_dataset_name, args.output_dir, timestamp,
-            args.model_path, args.job_nums, 0, len(slice_), gpus_per_job, args.backend,
-            args.data_range, job_gpus, job_problems, field_mapping, unified_code_solutions_file,
+            job_id, eval_config, dataset_names, args.output_dir, timestamp,
+            args.model_path, args.job_nums, 0, len(job_problems), gpus_per_job, args.backend,
+            dataset_ranges, job_gpus, job_problems, field_mapping,
         ))
     return job_args_list
 
@@ -478,7 +634,7 @@ def _run_jobs(job_args_list) -> Tuple[int, int]:
 
 
 def allocate_gpus_and_run_jobs(args) -> None:
-    """Top-level: split selected problems across jobs, run in parallel, then combine."""
+    """Load one model per job, evaluate all requested datasets, then combine by dataset."""
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     print(f"Running {args.job_nums} jobs with {args.tp_size_per_job} GPU(s) per job")
 
@@ -487,11 +643,21 @@ def allocate_gpus_and_run_jobs(args) -> None:
     available_gpus = [int(x.strip()) for x in visible.split(",") if x.strip()] or list(range(8))
     print(f"Available GPU devices: {available_gpus}")
 
-    dataset_names = [n.strip() for n in args.dataset_name.split(",")]
+    dataset_names = [n.strip() for n in args.dataset_name.split(",") if n.strip()]
+    unsupported = [name for name in dataset_names if name in _UNSUPPORTED_CODE_DATASETS]
+    if unsupported:
+        descriptions = "; ".join(f"{name}: {_UNSUPPORTED_CODE_DATASETS[name]}" for name in unsupported)
+        raise ValueError(f"Cannot evaluate requested dataset(s): {descriptions} Refusing to apply another dataset's tests.")
     dataset, field_mapping = load_combined_dataset(dataset_names)
-    combined_dataset_name = "_".join(dataset_names)
+    answer_types = field_mapping.get("answer_types_by_dataset", {})
+    missing_graders = [
+        name for name in dataset_names
+        if answer_types.get(name) not in _CODE_ANSWER_TYPES and name not in matheval.evaluator_map
+    ]
+    if missing_graders:
+        raise ValueError(f"No math grader is registered for dataset(s): {missing_graders}")
 
-    selected = _select_problems(args, dataset)
+    selected, dataset_ranges = _select_problems(args, dataset, dataset_names)
 
     # Load + tag YAML config (worker reads back the tags via config["_..."]).
     with open(args.eval_config, "r") as f:
@@ -499,30 +665,25 @@ def allocate_gpus_and_run_jobs(args) -> None:
     eval_config["_logger_level"] = args.logger_level
     eval_config["_random_seed"] = getattr(args, "random_seed", 420)
 
-    # Output dir: <output_dir or model_path/eval_results>/<dataset>_<backend>/<ts>[/TASK_a_b]/
+    # Each dataset keeps the established <dataset>_<backend>/<ts>[/TASK]/ layout.
     if args.output_dir is None:
         args.output_dir = Path(args.model_path) / "eval_results"
-    suffix = ""
-    if args.data_range and not getattr(args, "data_ids", None):
-        a, b = parse_data_range(args.data_range, len(dataset))
-        suffix = f"TASK_{a}_{b}"
-    combined_dir = Path(args.output_dir) / f"{combined_dataset_name}_{args.backend}" / timestamp
-    if suffix:
-        combined_dir = combined_dir / suffix
-    combined_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(args.eval_config, combined_dir / Path(args.eval_config).name)
-    print(f"Saved evaluation config to: {combined_dir / Path(args.eval_config).name}")
-
-    is_code = field_mapping.get("answer_type", "boxed") in _CODE_ANSWER_TYPES
-    code_solutions_file: Optional[Path] = None
-    if is_code:
-        code_solutions_file = combined_dir / "code_solutions.jsonl"
-        code_solutions_file.write_text("", encoding="utf-8")
-        print(f"Code solutions file: {code_solutions_file}")
+    args.output_dir = str(args.output_dir)
+    dataset_run_dirs = {}
+    for ds_name in dataset_names:
+        ds_run_dir = _dataset_run_dir(args.output_dir, ds_name, args.backend, timestamp, dataset_ranges.get(ds_name))
+        ds_run_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(args.eval_config, ds_run_dir / Path(args.eval_config).name)
+        dataset_run_dirs[ds_name] = ds_run_dir
+        if answer_types[ds_name] in _CODE_ANSWER_TYPES:
+            code_file = ds_run_dir / "code_solutions.jsonl"
+            code_file.write_text("", encoding="utf-8")
+            print(f"Code solutions file for {ds_name}: {code_file}")
+    print(f"Saved evaluation config in {len(dataset_run_dirs)} dataset run director(ies)")
 
     job_args_list = _build_job_args(
-        args, dataset, selected, eval_config, combined_dataset_name, timestamp,
-        available_gpus, args.tp_size_per_job, field_mapping, code_solutions_file,
+        args, selected, eval_config, dataset_names, timestamp,
+        available_gpus, args.tp_size_per_job, field_mapping, dataset_ranges,
     )
     print(f"\nPrepared {len(job_args_list)} jobs for execution")
 
@@ -532,15 +693,16 @@ def allocate_gpus_and_run_jobs(args) -> None:
         print(f"WARNING: {failed} job(s) failed; results may be incomplete.")
 
     print("\nCombining results from all jobs...")
-    combine_job_results(combined_dir, len(job_args_list), args.del_job_dir)
-
-    if is_code and code_solutions_file is not None and code_solutions_file.exists():
-        from tah.evaluate.codeeval import evaluate as code_evaluate
-        evalplus_dataset = field_mapping["answer_type"] if field_mapping["answer_type"] in ("humaneval", "mbpp") else "humaneval"
-        n_lines = sum(1 for _ in open(code_solutions_file))
-        print(f"\nCode eval: {combined_dataset_name} on {n_lines} solutions ({code_solutions_file})")
-        code_evaluate(dataset=evalplus_dataset, samples=str(code_solutions_file))
-        print(f"Code eval results: {str(code_solutions_file).replace('.jsonl', '.eval_results.json')}")
+    for ds_name, ds_run_dir in dataset_run_dirs.items():
+        combine_job_results(ds_run_dir, args.job_nums, args.del_job_dir)
+        if answer_types[ds_name] in _CODE_ANSWER_TYPES:
+            code_solutions_file = ds_run_dir / "code_solutions.jsonl"
+            if code_solutions_file.exists() and code_solutions_file.stat().st_size:
+                from tah.evaluate.codeeval import evaluate as code_evaluate
+                n_lines = sum(1 for _ in open(code_solutions_file, encoding="utf-8"))
+                print(f"\nCode eval: {ds_name} on {n_lines} solutions ({code_solutions_file})")
+                code_evaluate(dataset=ds_name, samples=str(code_solutions_file), allow_subset=True)
+                print(f"Code eval results: {code_solutions_file.with_suffix('.eval_results.json')}")
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -551,7 +713,6 @@ def allocate_gpus_and_run_jobs(args) -> None:
 def combine_job_results(output_dir: Path, job_nums: int, del_job_dir: bool = False) -> None:
     """Aggregate per-job CSV/JSON outputs into combined files under ``output_dir``."""
     all_results: List[dict] = []
-    problem_stats: Dict[str, dict] = {}
     samples_jsonl_path = output_dir / "samples.jsonl"
     samples_jsonl_path.write_text("", encoding="utf-8")  # truncate
 
@@ -568,63 +729,64 @@ def combine_job_results(output_dir: Path, job_nums: int, del_job_dir: bool = Fal
                     row["input_tokens"] = int(row["input_tokens"])
                     row["output_tokens"] = int(row["output_tokens"])
                     row["processing_time"] = float(row["processing_time"])
+                    row["mean_passes_per_token"] = float(row["mean_passes_per_token"]) if row.get("mean_passes_per_token") else ""
+                    row["fraction_tokens_at_least_2_passes"] = float(row["fraction_tokens_at_least_2_passes"]) if row.get("fraction_tokens_at_least_2_passes") else ""
+                    row["pass_stat_tokens"] = int(row.get("pass_stat_tokens") or 0)
                     all_results.append(row)
-
-        stats_file = job_dir / "evaluation_stats.csv"
-        if stats_file.exists():
-            with open(stats_file, "r", encoding="utf-8") as f:
-                reader = csv.reader(f)
-                next(reader, None)  # header
-                for row in reader:
-                    if not row or row[0] in ("", "Total Accuracy"):
-                        continue
-                    problem_stats[row[0]] = {
-                        "accuracy": f"{float(row[1]):.3f}",
-                        "correct_count": int(row[2]),
-                        "total_samples": int(row[3]),
-                        "avg_output_length": float(row[4]) if len(row) >= 5 else 0.0,
-                    }
 
         details_dir = job_dir / "details"
         if not details_dir.exists():
             continue
-        for problem_dir in details_dir.iterdir():
-            if not problem_dir.is_dir():
-                continue
-            for sample_json in sorted(problem_dir.glob("sample_*.json")):
-                with open(sample_json, "r", encoding="utf-8") as f_json:
-                    obj = json.load(f_json)
-                try:
-                    sample_idx = int(sample_json.stem.split("_")[-1])
-                except Exception:
-                    sample_idx = -1
-                obj["id"] = problem_dir.name
-                obj["sample"] = sample_idx
-                with open(samples_jsonl_path, "a", encoding="utf-8") as out_f:
-                    out_f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        for sample_json in sorted(details_dir.rglob("sample_*.json")):
+            with open(sample_json, "r", encoding="utf-8") as f_json:
+                obj = json.load(f_json)
+            try:
+                sample_idx = int(sample_json.stem.split("_")[-1])
+            except Exception:
+                sample_idx = -1
+            obj["id"] = obj.get("problem_id", sample_json.parent.name)
+            obj["sample"] = sample_idx
+            with open(samples_jsonl_path, "a", encoding="utf-8") as out_f:
+                out_f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
-    # Recompute per-problem avg_output_length using all_results (more authoritative).
-    by_pid: Dict[str, List[int]] = {}
-    for r in all_results:
-        by_pid.setdefault(r["problem_id"], []).append(r["output_tokens"])
-    for pid, lens in by_pid.items():
-        if pid in problem_stats:
-            problem_stats[pid]["avg_output_length"] = sum(lens) / len(lens)
+    by_problem: Dict[str, List[dict]] = {}
+    for row in all_results:
+        by_problem.setdefault(row["problem_id"], []).append(row)
+    problem_stats = {}
+    for pid, rows in by_problem.items():
+        n = len(rows)
+        stat_n = sum(int(r.get("pass_stat_tokens") or 0) for r in rows)
+        problem_stats[pid] = {
+            "accuracy": sum(1 for r in rows if r["is_correct"]) / n if n else 0.0,
+            "correct_count": sum(1 for r in rows if r["is_correct"]),
+            "total_samples": n,
+            "avg_output_length": sum(r["output_tokens"] for r in rows) / n if n else 0.0,
+            "mean_passes_per_token": _weighted_field(rows, "mean_passes_per_token", "pass_stat_tokens"),
+            "fraction_tokens_at_least_2_passes": _weighted_field(rows, "fraction_tokens_at_least_2_passes", "pass_stat_tokens"),
+            "pass_stat_tokens": stat_n,
+        }
 
     total_n = len(all_results)
     total_c = sum(1 for r in all_results if r["is_correct"])
     total_avg_out = sum(r["output_tokens"] for r in all_results) / total_n if total_n else 0.0
+    total_mean_pass = _weighted_field(all_results, "mean_passes_per_token", "pass_stat_tokens")
+    total_frac_two = _weighted_field(all_results, "fraction_tokens_at_least_2_passes", "pass_stat_tokens")
+    total_pass_tokens = sum(int(r.get("pass_stat_tokens") or 0) for r in all_results)
 
     stats_file = output_dir / "evaluation_stats.csv"
     with open(stats_file, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["problem_id", "accuracy", "correct_count", "total_samples", "avg_output_length"])
+        w.writerow(["problem_id", "accuracy", "correct_count", "total_samples", "avg_output_length",
+                    "mean_passes_per_token", "fraction_tokens_at_least_2_passes", "pass_stat_tokens"])
         for pid, st in sorted(problem_stats.items()):
-            w.writerow([pid, st["accuracy"], st["correct_count"], st["total_samples"], f"{st['avg_output_length']:.2f}"])
+            w.writerow([pid, f"{st['accuracy']:.3f}", st["correct_count"], st["total_samples"],
+                        f"{st['avg_output_length']:.2f}", _fmt_optional(st["mean_passes_per_token"]),
+                        _fmt_optional(st["fraction_tokens_at_least_2_passes"]), st["pass_stat_tokens"]])
         w.writerow([])
         w.writerow([
             "Total Accuracy", f"{(total_c/total_n if total_n else 0):.3f}",
-            total_c, total_n, f"{total_avg_out:.2f}",
+            total_c, total_n, f"{total_avg_out:.2f}", _fmt_optional(total_mean_pass),
+            _fmt_optional(total_frac_two), total_pass_tokens,
         ])
 
     results_file = output_dir / "detailed_results.csv"
@@ -632,7 +794,7 @@ def combine_job_results(output_dir: Path, job_nums: int, del_job_dir: bool = Fal
         w = csv.DictWriter(f, fieldnames=list(_CSV_FIELDS))
         w.writeheader()
         for r in sorted(all_results, key=lambda x: (x["problem_id"], x["sample_idx"])):
-            w.writerow({k: r[k] for k in _CSV_FIELDS})
+            w.writerow({k: r.get(k, "") for k in _CSV_FIELDS})
 
     print(f"\nCombined results from {job_nums} jobs")
     print(f"Overall accuracy: {(total_c/total_n if total_n else 0):.4f}")

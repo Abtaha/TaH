@@ -16,10 +16,12 @@ from tah.evaluate.jobs import (
     parse_data_range,
     run_single_job,
 )
+from tah.evaluate.results import collect_results
 
 __all__ = [
     "allocate_gpus_and_run_jobs",
     "combine_job_results",
+    "collect_results",
     "load_combined_dataset",
     "parse_data_range",
     "run_single_job",

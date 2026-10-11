@@ -39,7 +39,7 @@ evaluation = [
     "sympy==1.13.1",
     "math_verify",
     "termcolor",
-    "evalplus",
+    "evalplus @ git+https://github.com/evalplus/evalplus@26d6d00bb1fd0fa37f39c99d5290da67891d1c5e",
     "sglang>=0.4.6",
 ]
 engine = [

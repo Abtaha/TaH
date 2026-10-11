@@ -1,9 +1,14 @@
 """Per-backend model loaders + inference adapters for the eval driver.
 
-Each ``setup_*`` function returns ``(model, inference_function)`` where
-``inference_function(prompts: list[str]) -> list[(text, seconds)]``. This
-shape is what the per-job runner consumes; it doesn't care which backend
-produced the strings.
+Each ``setup_*`` function returns ``(model, inference_function)``. Legacy
+inference functions accept ``prompts`` and return ``[(text, seconds)]``.
+Callback backends may set ``infer.supports_callback = True`` and accept
+``infer(prompts, on_result=callback)`` instead. Such a function receives the
+complete prompt list once and calls ``callback(index, result)`` as results
+arrive, where a result is ``(text, seconds)`` or
+``(text, seconds, pass_counts)``. ``pass_counts`` is an optional sequence of
+per-generated-token pass counts. The callback path lets the harness persist
+each result immediately; existing backends need no changes.
 
 Backends:
   * ``setup_sglang`` — ``sgl.Engine`` for production-throughput inference.
@@ -16,12 +21,12 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import fields
-from typing import Callable, Dict, Iterable, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 
 
-InferenceFn = Callable[[List[str]], List[Tuple[str, float]]]
+InferenceFn = Callable[..., Optional[List[Tuple]]]
 
 
 def time_inference(fn: Callable):
@@ -173,7 +178,7 @@ def setup_tah(config: Dict, model_path: str, tokenizer, tp_size: int = 1) -> Tup
             batch = prompts[i:i + bs]
             inputs = tokenizer(batch, return_tensors="pt", padding=True, padding_side="left")
             inputs = {k: v.to(model.device) for k, v in inputs.items()}
-            (_, texts), elapsed = time_inference(lambda: TaHForCasualLM_generate(
+            (_, texts, pass_counts), elapsed = time_inference(lambda: TaHForCasualLM_generate(
                 tah_model=model, tokenizer=tokenizer, model_inputs=inputs,
                 max_new_tokens=config["max_new_tokens"],
                 do_sample=config["temperature"] > 0.0,
@@ -182,9 +187,10 @@ def setup_tah(config: Dict, model_path: str, tokenizer, tp_size: int = 1) -> Tup
                 top_k=config.get("top_k", 0),
                 min_p=config.get("min_p", 0.0),
                 verbose=False,
+                return_pass_counts=True,
             ))
             per = elapsed / max(len(texts), 1)
-            out.extend((t, per) for t in texts)
+            out.extend((t, per, counts) for t, counts in zip(texts, pass_counts))
         return out
 
     return model, infer

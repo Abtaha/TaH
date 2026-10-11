@@ -31,7 +31,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output_dir", default=None,
                    help="Output directory; defaults to <model_path>/eval_results")
     p.add_argument("--data_range", type=int, nargs="+", default=None,
-                   help="Subset slice — [end] or [start, end]")
+                   help="Subset slice per dataset — [end] or [start, end]")
+    p.add_argument("--dataset_ranges", default=None,
+                   help='Per-dataset slice overrides, e.g. "math500=0:200,gpqa=all"')
     p.add_argument("--data_ids", default=None,
                    help='Comma-separated specific problem IDs (e.g. "gsm8k_0,gsm8k_5"); overrides --data_range')
     p.add_argument("--del_job_dir", type=bool, default=True,
