@@ -86,6 +86,10 @@ def check_environment() -> None:
     del flashinfer
 
 
-check_environment()
+# Reference fixture tools/loaders also live here and run without CUDA. An
+# explicitly hidden GPU opts into that mode; normal runtime imports still
+# perform the WP0 prerequisite check.
+if os.environ.get("CUDA_VISIBLE_DEVICES") != "":
+    check_environment()
 
 __all__ = ["check_environment"]
