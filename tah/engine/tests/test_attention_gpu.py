@@ -1,5 +1,7 @@
 """Deferred FlashInfer/Triton checks; never run while another GPU job owns it."""
 import os
+import json
+from pathlib import Path
 
 import pytest
 import torch
@@ -17,7 +19,8 @@ def test_cuda_randomized_attention(name, heads, kv_heads, dim, seed):
     bucket = DecodeBucket(pool, len(rows), sum(r.request.size for r in rows), heads)
     bucket.prepare(rows)
     expected = dense_oracle(pool, rows, q)
-    torch.testing.assert_close(bucket.run(q, 0).float(), expected.float(), atol=.015, rtol=.02)
+    decoded = bucket.run(q, 0).clone()
+    torch.testing.assert_close(decoded.float(), expected.float(), atol=.015, rtol=.02)
     ptr, indices = bucket.indptr.cpu(), bucket.indices.cpu()
     for i, row in enumerate(rows):
         wanted = [slot for d, t in enumerate(row.request.streams) for slot, p in zip(t.host_slots, t.host_positions)
@@ -26,7 +29,16 @@ def test_cuda_randomized_attention(name, heads, kv_heads, dim, seed):
     chunk_rows = [AttentionRow(r.request, p, r.depth) for r in rows for p in [0, r.position, r.request.streams[0].host_positions[-1]]]
     chunk_q = q.repeat_interleave(3, 0)
     prefill = PrefillAttention(pool, chunk_rows, heads)
-    torch.testing.assert_close(prefill.run(chunk_q, 0).float(), dense_oracle(pool, chunk_rows, chunk_q).float(), atol=.015, rtol=.02)
+    prefilled = prefill.run(chunk_q, 0)
+    prefill_expected = dense_oracle(pool, chunk_rows, chunk_q)
+    torch.testing.assert_close(prefilled.float(), prefill_expected.float(), atol=.015, rtol=.02)
+    destination = Path('data/engine/wp4/gpu-attention')
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / f'{name}-{seed}.json').write_text(json.dumps(dict(
+        production_gates_eligible=False, device=torch.cuda.get_device_name(),
+        decode_max_abs=float((decoded.float() - expected.float()).abs().max()),
+        prefill_max_abs=float((prefilled.float() - prefill_expected.float()).abs().max()),
+        decode_queries=len(rows), prefill_queries=len(chunk_rows), status='PASS'), indent=2))
 
 
 def test_cuda_metadata_graph_mutation_and_replan():
@@ -76,7 +88,7 @@ def test_cuda_metadata_graph_mutation_and_replan():
 
 def test_cuda_pinned_snapshot_round_trip():
     from tah.engine.kv_cache import KVSnapshot
-    pool, rows, q = make_case(5, 16, 8, 128, device='cuda')
+    pool, rows, q = make_case(5, 16, 8, 128, device='cuda', num_layers=3)
     request = rows[-1].request
     snapshot = pool.gather(request)
     original = snapshot.values.clone()
@@ -99,7 +111,9 @@ def test_cuda_cached_model_pass_capture(tmp_path):
     from tah.engine.model import EagerTaHModel
     from tah.engine.tests.test_model import reference
     from tah.engine.tests.test_cached_model import new_pool
-    reference(tmp_path)
+    # FlashInfer's CUDA kernels use tensor-core tiles; match production head
+    # width while keeping the reference constructor's layers/vocab tiny.
+    reference(tmp_path, head_dim=128)
     model = EagerTaHModel.from_pretrained(tmp_path, device='cuda')
     pool = new_pool(model, 64)
     a, b = [pool.create_request(i, context_limit=32) for i in range(2)]
@@ -140,4 +154,41 @@ def test_cuda_cached_model_pass_capture(tmp_path):
     torch.testing.assert_close(captured.logits, expected.logits, atol=0, rtol=0)
     for r in [a, b]:
         pool.release(r)
+    assert pool.audit()['free'] == pool.capacity
+
+
+def test_cuda_long_stream_staging_growth():
+    """Tile boundaries, empty streams and pointer changes after table growth."""
+    from tah.engine.kv_cache import SlotPool
+    lengths = [255, 256, 257, 2049, 4096]
+    pool = SlotPool(sum(lengths) * 3 + 32, 1, 8, 128, 3, device='cuda')
+    rows = []
+    for index, length in enumerate(lengths):
+        request = pool.create_request(index, context_limit=length + 8)
+        pool.allocate(request, 0, list(range(length)))
+        pool.allocate(request, 1, list(range(0, length, 3)) if index else [])
+        pool.allocate(request, 2, list(range(0, length, 7)) if index > 1 else [])
+        rows.append(AttentionRow(request, length - 3, 1 + index % 3))
+    pool.values.normal_()
+    q = torch.randn(len(rows), 16, 128, dtype=torch.bfloat16, device='cuda')
+    bucket = DecodeBucket(pool, len(rows), pool.capacity, 16)
+    def check():
+        bucket.prepare(rows)
+        ptr, ids = bucket.indptr.cpu(), bucket.indices.cpu()
+        for index, row in enumerate(rows):
+            wanted = [slot for d, t in enumerate(row.request.streams)
+                      for slot, p in zip(t.host_slots, t.host_positions) if d < row.depth and p <= row.position]
+            assert ids[int(ptr[index]):int(ptr[index + 1])].tolist() == wanted
+        torch.testing.assert_close(bucket.run(q, 0).float(), dense_oracle(pool, rows, q).float(), atol=.015, rtol=.02)
+    check()
+    old_pointers = [r.request.streams[0].slots.data_ptr() for r in rows]
+    for index, row in enumerate(rows):
+        slots = pool.allocate(row.request, 0, [lengths[index]])
+        pool.write(0, slots, torch.randn(1, 8, 128, device='cuda', dtype=pool.dtype),
+                   torch.randn(1, 8, 128, device='cuda', dtype=pool.dtype))
+        rows[index] = AttentionRow(row.request, lengths[index], 3)
+    assert all(old != row.request.streams[0].slots.data_ptr() for old, row in zip(old_pointers, rows))
+    check()
+    for row in rows:
+        pool.release(row.request)
     assert pool.audit()['free'] == pool.capacity

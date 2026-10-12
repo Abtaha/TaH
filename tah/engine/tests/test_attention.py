@@ -13,10 +13,10 @@ from tah.engine.kv_cache import SlotPool
 SHAPES = [('Qwen3-0.6B', 16, 8, 128), ('Qwen3-1.7B', 16, 8, 128), ('tiny', 4, 2, 8)]
 
 
-def make_case(seed, heads, kv_heads, dim, device='cpu', dtype=torch.bfloat16):
+def make_case(seed, heads, kv_heads, dim, device='cpu', dtype=torch.bfloat16, num_layers=1):
     # Host generator keeps CPU/GPU layouts identical and never initializes CUDA.
     gen = torch.Generator(device='cpu').manual_seed(seed)
-    pool = SlotPool(512, 1, kv_heads, dim, 3, device=device, dtype=dtype)
+    pool = SlotPool(512, num_layers, kv_heads, dim, 3, device=device, dtype=dtype)
     rows = []
     for request_id, length in enumerate([1, 7, 13, 31, 47]):
         request = pool.create_request(request_id, context_limit=128)

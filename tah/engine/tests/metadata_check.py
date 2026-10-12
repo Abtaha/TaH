@@ -16,16 +16,20 @@ def main():
         os.environ['TRITON_INTERPRET'] = '1'
     import torch
     import triton
-    from tah.engine.attention_kernels import count_visible, pack_visible
+    from tah.engine.attention_kernels import count_visible, pack_visible, stage_sources
     report = dict(production_gates_eligible=False, mode=args.mode, cases=[])
     if args.mode == 'compile':
         from triton.compiler import ASTSource
         from triton.backends.compiler import GPUTarget
         for arch in [80, 86, 89]:
             for fn, names in [(count_visible, ['pos', 'depths', 'starts', 'lengths', 'query_pos', 'query_depth', 'counts']),
-                (pack_visible, ['slots', 'pos', 'depths', 'starts', 'lengths', 'query_pos', 'query_depth', 'indptr', 'indices'])]:
-                signature = {name: '*i64' if name in ['pos', 'query_pos'] else '*i32' for name in names}
-                compiled = triton.compile(ASTSource(fn, signature, constants={'BLOCK': 256}), target=GPUTarget('cuda', arch, 32))
+                (pack_visible, ['slots', 'pos', 'depths', 'starts', 'lengths', 'query_pos', 'query_depth', 'indptr', 'indices']),
+                (stage_sources, ['descriptors', 'slots', 'positions', 'depths', 'starts', 'lengths', 'query_pos', 'query_depth'])]:
+                signature = {name: '*i64' if name in ['descriptors', 'pos', 'positions', 'query_pos'] else '*i32' for name in names}
+                constants = {'BLOCK': 256}
+                if fn is stage_sources:
+                    constants['STREAMS'] = 3
+                compiled = triton.compile(ASTSource(fn, signature, constants=constants), target=GPUTarget('cuda', arch, 32))
                 report['cases'].append(dict(arch=arch, kernel=fn.__name__, ptx_bytes=len(compiled.asm['ptx']),
                                             cubin_bytes=len(compiled.asm['cubin'])))
     else:
@@ -50,6 +54,25 @@ def main():
                 assert int(counts[row]) == len(expected)
                 assert torch.equal(ids[int(ptr[row]):int(ptr[row + 1])], expected)
             assert bool((ids[int(ptr[-1]):] == -1).all()), 'compaction wrote outside packed result'
+            descriptors, references, expected_slots, expected_pos, expected_depth = [], [], [], [], []
+            for row in range(len(lengths)):
+                sl = slice(int(starts[row]), int(starts[row] + lengths[row]))
+                slot_tables = [slots[sl][depths[sl] == d].contiguous() for d in [1, 2, 3]]
+                pos_tables = [pos[sl][depths[sl] == d].contiguous() for d in [1, 2, 3]]
+                references.extend(slot_tables + pos_tables)
+                descriptors.append([*[t.data_ptr() for t in slot_tables], *[t.data_ptr() for t in pos_tables],
+                                    *[len(t) for t in slot_tables], int(starts[row]), int(lengths[row]), int(qp[row]), int(qd[row])])
+                expected_slots.extend(slot_tables)
+                expected_pos.extend(pos_tables)
+                expected_depth.extend([torch.full((len(t),), d, dtype=torch.int32) for d, t in enumerate(slot_tables, 1)])
+            staged_slots, staged_pos, staged_depth = torch.empty_like(slots), torch.empty_like(pos), torch.empty_like(depths)
+            staged_starts, staged_lengths, staged_qp, staged_qd = [torch.empty_like(t) for t in [starts, lengths, qp, qd]]
+            stage_sources[(len(lengths),)](torch.tensor(descriptors, dtype=torch.long), staged_slots, staged_pos,
+                staged_depth, staged_starts, staged_lengths, staged_qp, staged_qd, STREAMS=3, BLOCK=256)
+            for actual, expected in [(staged_slots, torch.cat(expected_slots)), (staged_pos, torch.cat(expected_pos)),
+                (staged_depth, torch.cat(expected_depth)), (staged_starts, starts), (staged_lengths, lengths),
+                (staged_qp, qp), (staged_qd, qd)]:
+                assert torch.equal(actual, expected), 'pointer-based staging mismatch'
             report['cases'].append(dict(seed=seed, rows=len(lengths), sources=total, visible=int(ptr[-1])))
     assert not torch.cuda.is_initialized()
     report['cuda_initialized'] = False

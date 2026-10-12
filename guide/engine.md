@@ -458,8 +458,15 @@ Use `device='cpu'` with `CUDA_VISIBLE_DEVICES=""` for development on small
 local checkpoints. The loader does not download models. `from_pretrained`
 accepts `config_override=None` and `dtype=torch.bfloat16`; override precedence
 matches the reference loader. Saved configuration applies when no override is
-supplied. These tools have not yet passed production cached parity or GPU
-capture validation.
+supplied. CUDA component capture/replay and pinned transfers have been
+validated on the RTX 3090; production cached parity is checked separately.
+Both 256-token chunks and token-by-token replay passed the production
+reference comparison for all four fixture checkpoints. The separate comparison
+with the full eager forward has one recorded failure: the single-pass
+checkpoint's token-by-token retained dense-row max error is 1.625 versus its
+1.359375 limit. A focused probe reproduces that difference in the reference's
+single-token versus full-sequence execution, with exact matching outputs for
+each corresponding layout. The recorded failure remains unresolved.
 
 `model.forward_chunk(input_ids, pool, request, *, start_position=0,
 iter_count_labels=None, hidden_positions=None, decode=False)` accepts a nonempty
@@ -535,8 +542,9 @@ current pass and earlier passes of the same token.
 workspace_bytes=134217728)` reserves fixed-address decode metadata and output
 buffers. `max_entries` must cover the sum of real occupied entries for its rows,
 including entries that their queries cannot see. Reserve room for growth; if it
-is exhausted, create a larger bucket outside capture. `prepare(rows)` stages
-stream lists and plans FlashInfer outside capture. Reprepare after allocation,
+is exhausted, create a larger bucket outside capture. `prepare(rows)` uploads
+small table-pointer/length descriptors, stages all real entries in one GPU
+kernel, and plans FlashInfer outside capture. Reprepare after allocation,
 restore, release, or row position/depth changes. It uses the host allocation
 ledger for planning and does not copy GPU context contents to the host.
 `build()` independently counts and compacts visible entries on the GPU into the
@@ -583,18 +591,71 @@ python -m tah.engine.tests.metadata_check --mode compile \
 ```
 
 `attention_check` accepts `--device cpu|cuda` (default CPU), positive `--repeats`
-(default 10), and required `--output`. It records batches 1/8/32 with variable
-context lengths, metadata construction, prepare wall time, decode, eight-query
-prefill, contiguous gather/scatter and final pool audits. Times are microseconds;
-CUDA additionally records metadata+attention graph replay and peak allocated
-memory. Select CUDA only when the GPU is free.
+(default 10), `--batches` (one or more positive integers; default 1/8/32),
+`--avg-context` (optional integer >=16), `--model-path` (optional local checkpoint,
+CUDA only), and required `--output`. Without `--avg-context`, request lengths
+are 31+17*row; with it they vary by +/-25% around the chosen mean. It records
+metadata construction, prepare wall time, decode, eight-query prefill,
+contiguous gather/scatter and final pool audits. Times are microseconds;
+CUDA additionally records preparation including completion, separate metadata
+and attention graph replay, their combined replay and peak allocated memory.
+Select CUDA only when the GPU is free.
+
+For representative contexts and full-model pass timing, after the GPU is free:
+
+```bash
+source .venv-tah/bin/activate
+CUDA_VISIBLE_DEVICES=0 python -m tah.engine.tests.attention_check --device cuda \
+  --batches 64 --avg-context 2048 --repeats 100 \
+  --output data/engine/attention-context2k.json
+CUDA_VISIBLE_DEVICES=0 python -m tah.engine.tests.attention_check --device cuda \
+  --model-path models/TaH-plus-1.7B --batches 64 --avg-context 2048 --repeats 20 \
+  --output data/engine/cached-model-context2k.json
+```
+
+`--model-path` measures all-layer cached passes instead of isolated attention.
+It uses randomized old KV, sparse later streams (about 1/16 occupancy in the
+second stream) and mixed row depths. The report adds model layer count, KV
+bytes, eager/graph pass times and metadata-preparation/pass time ratio. A case
+fails clearly if KV would use more than 85% of measured free memory after
+loading weights. This times pass-local logits/hidden states; it excludes
+continuation decisions, soft-input updates and sampling and is not generation
+throughput or an accuracy check.
+
+On the RTX 3090, B=64 with mean context 2048, metadata preparation measured
+0.699 ms against a 28.474 ms full-model cached pass graph (2.45%). This proxy
+uses 28 layers and 139,354 KV entries, with exact eager/graph logits and hidden
+states. It supports the metadata budget assessment for that shape; complete
+generation throughput and L40S measurements remain separate checks.
 
 `metadata_check` requires empty CUDA visibility, `--mode interpret|compile`,
 and `--output`. Interpretation checks exact ragged visibility/compaction on CPU.
-Compilation builds both kernels offline for sm80/sm86/sm89 using the installed
+Compilation builds all three kernels offline for sm80/sm86/sm89 using the installed
 Triton/toolchain and never loads a CUDA module. Reports include
 `production_gates_eligible=false`; CPU correctness and timing do not establish
 production model parity, GPU performance or portability.
+
+Cached production validation, when the GPU is available:
+
+```bash
+source .venv-tah/bin/activate
+for chunk_size in 256 1; do
+  for checkpoint in real mlp3 mlp1 label3; do
+    CUDA_VISIBLE_DEVICES=0 python -m pytest -q -s -o addopts= -m 'gpu and slow' \
+      "tah/engine/tests/test_cached_gtf.py::test_cached_production_gtf[${chunk_size}-${checkpoint}]"
+  done
+done
+```
+
+These are long validation runs: about four minutes per chunked case and
+9–13 minutes per token-by-token case on the measured RTX 3090. They require
+complete eligible production fixtures, verify hashes, and derive the same
+reference decision/margin/pass-count limits as the full-forward gate above.
+Reports are written to `data/engine/wp4/gtf/chunk{1,256}/`: `<checkpoint>.json`
+compares with the reference; `<checkpoint>-vs-wp3.json` compares with the full
+eager model. Each includes PASS/FAIL, comparisons, summary, `noise_limits` and
+`decision_limits`. A failed paired retained-coordinate assertion remains FAIL;
+neither limits nor reference files are changed by the test.
 
 ## Graph-safe sampling
 

@@ -9,7 +9,8 @@ import torch
 from tah.engine.fixtures import FixtureSuite
 from tah.engine.kv_cache import SlotPool
 from tah.engine.model import EagerTaHModel, TeacherForcedOutput
-from tah.engine.parity import assert_gtf, compare_output, require_production
+from tah.engine.parity import (assert_gtf, compare_output, derive_decision_limits,
+                               gtf_summary, production_noise, require_production)
 from tah.engine.tests.test_gtf import test_gtf_every_wp2_fixture_set as run_oracle_gtf
 
 pytestmark = [pytest.mark.gpu, pytest.mark.slow,
@@ -21,6 +22,14 @@ pytestmark = [pytest.mark.gpu, pytest.mark.slow,
 def test_cached_production_gtf(name, chunk_size, monkeypatch):
     suite = FixtureSuite(os.environ.get('TAH_GTF_FIXTURES', 'data/engine/fixtures/reference'))
     require_production(suite)
+    tolerances_path = Path(os.environ.get('TAH_GTF_TOLERANCES', 'data/engine/wp2/tolerances.json'))
+    noise = production_noise(suite, name, json.loads(tolerances_path.read_text()))
+    decision_limits = derive_decision_limits(noise)
+    # Identical to WP3's predeclared self-noise limits; never infer these from
+    # candidate cached outputs or reuse the obsolete fixed-decision gate.
+    wp3_limits_path = Path('data/engine/wp3/gtf') / f'{name}-limits.json'
+    if wp3_limits_path.exists():
+        assert decision_limits == json.loads(wp3_limits_path.read_text())['decision_limits']
     original_forward = EagerTaHModel.forward
     paired = []
     templates = [suite.load(r) for r in suite.records(kind='teacher_forced', checkpoint=name) if r['variant'] == 'single']
@@ -46,6 +55,8 @@ def test_cached_production_gtf(name, chunk_size, monkeypatch):
             for key, value in vars(chunk).items():
                 setattr(chunk, key, value.cpu())
             chunks.append(chunk)
+            if chunk_size == 1 and (end % 256 == 0 or end == len(ids)):
+                print(f"Cached G-TF {name}: {end}/{len(ids)} tokens (decode)", flush=True)
         output = TeacherForcedOutput(
             torch.cat([c.logits for c in chunks]), torch.cat([c.iter_count for c in chunks]),
             *[torch.cat([getattr(c, key) for c in chunks], 1) for key in
@@ -74,8 +85,17 @@ def test_cached_production_gtf(name, chunk_size, monkeypatch):
     # Existing gate verifies hashes, every layout, full-vocabulary reference
     # replay, margins, and unchanged production noise limits.
     run_oracle_gtf(name)
-    noise = suite.manifest['self_noise'][name]['teacher_forced']['summary']
-    stats = assert_gtf(paired, noise)
-    (destination / f'{name}-vs-wp3.json').write_text(json.dumps(dict(
+    stats = gtf_summary(paired)
+    report = dict(
         production_gates_eligible=True, gate='G-TF cached vs WP3 full',
-        chunk_size=chunk_size, summary=stats, comparisons=paired), indent=2))
+        chunk_size=chunk_size, summary=stats, comparisons=paired,
+        decision_limits=decision_limits, noise_limits=noise)
+    try:
+        assert_gtf(paired, noise)
+    except AssertionError:
+        report['status'] = 'FAIL'
+        raise
+    else:
+        report['status'] = 'PASS'
+    finally:
+        (destination / f'{name}-vs-wp3.json').write_text(json.dumps(report, indent=2))
