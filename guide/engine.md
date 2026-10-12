@@ -19,6 +19,132 @@ environment/kernel checks, and [evaluation](evaluation.md) for the shipped
 reference `tah` backend. TaH2's bundled `tah2/minisgl/` is a separate engine;
 see the main [README](../README.md#tah2-usage) for its usage.
 
+## Reference parity fixtures
+
+The reference fixture tool records teacher-forced depth decisions, probabilities,
+pass counts, logits and selected hidden inputs, plus greedy generations. It runs
+the existing reference model and generation helper. Reference/model dependencies
+are used by this tool, while the fixture loader only needs torch and safetensors.
+
+From the repository root, this prepares benchmark inputs and synthetic checkpoint
+files on CPU. The real checkpoint must already exist locally:
+
+```bash
+source .venv-tah/bin/activate
+CUDA_VISIBLE_DEVICES="" python -m tah.engine.generate_fixtures \
+  --profile full --prepare-only --output data/engine/fixtures/reference
+```
+
+When the GPU is available, run one checkpoint at a time:
+
+```bash
+source .venv-tah/bin/activate
+for checkpoint in real mlp3 mlp1 label3; do
+  CUDA_VISIBLE_DEVICES=0 python -m tah.engine.generate_fixtures \
+    --profile full --device cuda --checkpoint "$checkpoint" \
+    --output data/engine/fixtures/reference || break
+done
+```
+
+The package checks the GPU/toolchain on import. Follow
+[installation](installation.md) if it reports missing Python headers or CUDA
+Toolkit prerequisites. CPU imports require explicitly empty CUDA visibility.
+For a small CPU development suite, use `--profile tiny --device cpu` and
+`--output data/engine/fixtures/cpu-tiny`; its tokens are remapped into a tiny random
+Qwen3 vocabulary and it cannot establish production parity tolerances.
+
+| Option | Default and behavior |
+| --- | --- |
+| `--profile tiny\|full` | `tiny`; full uses the real checkpoint and three synthetic Qwen3-0.6B-Base checkpoints. |
+| `--device cpu\|cuda` | `cpu`; CUDA is an explicit choice and is refused when visibility is empty. Full capture requires CUDA. |
+| `--prepare-only` | Prepare/reuse inputs and synthetic models; do not capture. Allows full preparation on CPU. |
+| `--output PATH` | `data/engine/fixtures/cpu-tiny`; fixture root. Use a different root for the full profile. |
+| `--model-output PATH` | `data/engine/fixture-models`; saves models under `<path>/<profile>/{mlp3,mlp1,label3}`. |
+| `--real-model PATH` | `models/TaH-plus-1.7B`; local real checkpoint and benchmark prompt tokenizer. |
+| `--base-model ID_OR_PATH` | `Qwen/Qwen3-0.6B-Base`; pretrained synthetic base and its tokenizer. Downloads may be needed during preparation. |
+| `--eval-config PATH` | `script/tah/recipes/qwen3_1.7/eval_tah.yaml`; reference TaH override for the real checkpoint. |
+| `--checkpoint real\|mlp3\|mlp1\|label3` | All checkpoints in the chosen profile; repeat the flag to select several. Tiny has no real checkpoint. |
+| `--seed INTEGER` | `20261012`; random base/adapter/decider preparation seed. |
+| `--topk INTEGER` | `32`, positive; final-logit values/indices retained at every position, capped at vocabulary size. |
+| `--chunk-size INTEGER` | `256`, nonnegative; reference cached teacher-forced chunk width. `0` uses the complete padded input width. |
+| `--generation-tokens INTEGER` | `8` for tiny, `256` for full; greedy generation cap. `0` selects the profile default; negative values are rejected. |
+| `--threads INTEGER` | `4`, positive; torch CPU thread count for preparation and metrics. |
+| `-h`, `--help` | Print usage and exit. |
+
+The full inputs contain three lengths (256, 1024, 4096 tokens) from each of
+math500, GPQA and HumanEval. Prompts match evaluation rendering. Continuations
+repeat a recorded dataset solution, canonical solution or answer scaffold to
+reach the target length; they are teacher-forced inputs. Each sequence has five
+teacher-forced layouts, and six prompts per checkpoint have four greedy layouts.
+The MLP3 random decider is calibrated to continue 10–40% of active tokens at
+each nonterminal depth, checked against the whole singleton fixture corpus.
+IterLabel teacher forcing includes oracle labels; its greedy cases have no labels
+and stop after one pass.
+
+Existing inputs/models are reused after profile/seed/source checks. A selected
+checkpoint's records are regenerated when that checkpoint is rerun. Capture
+settings must match an existing suite with records; choose a new output root to
+change them. Interrupted captures remain incomplete. `--prepare-only` marks the
+manifest prepared, so use it before production capture. Production eligibility
+becomes true only after all four checkpoint sets finish and depth coverage passes.
+
+Outputs under the fixture root:
+
+| File | Contents |
+| --- | --- |
+| `inputs.json` | Dataset provenance, rendered prompts, continuation descriptions and exact token IDs. |
+| `manifest.json` | Schema version, status, production eligibility, effective configs, dependency versions, source/checkpoint/record hashes, file sizes and self-noise statistics. |
+| `<checkpoint>/teacher_forced/*.safetensors` | Unpadded inputs and per-depth traces; one file per sequence/layout. |
+| `<checkpoint>/greedy/*.safetensors` | Prompt/generated IDs, separate prompt and generation pass counts; EOS excluded. |
+| `<checkpoint>/self_noise.json` | Detailed and aggregate teacher-forced errors, per-depth decision/margin counts and greedy first-divergence positions. |
+
+Teacher-forced tensors include `visited`, `decision`, `continue_probability`,
+`decision_logits`, `pass_count`, `final_topk_values`, `final_topk_indices`,
+`final_top1`, `hidden_positions`, `hidden_layer_indices`, `decider_hidden`,
+`logit_positions`, and `final_logits_sample`; oracle cases also include
+`iter_count_labels`. Depth axes are zero-based. Unvisited probability/logit/hidden
+entries are NaN and must be masked by `visited`. Cap probabilities are zero;
+label-decider probabilities are deterministic 0/1. Hidden indices follow HF's
+hidden-state tuple, including embeddings at index 0 and final normalization at
+the last index. Up to twelve positions retain hidden inputs and four retain
+dense vocabulary logits. Every position retains its top-k and actual argmax.
+
+Full-vocabulary self-noise is measured at every position during capture, although
+only sampled dense rows are stored. Use reference replay for exhaustive logit
+checks, or the separately recorded retained-coordinate metrics for disk-only
+checks. Never compare independent top-k rank lists as if they had equal indices.
+G-TF limits are 1.5 times the measured error or top-1 disagreement rate, with no
+epsilon floor; per-depth decision agreement must still be at least 99.5%, and
+every mismatch must be within 0.01 of the effective threshold. Greedy divergence
+positions are zero-based; `null` means identical IDs and EOS length. Compare
+divergence distributions using the same prompt/layout cohort, treating identical
+pairs as infinite first-divergence positions. An engine's fraction of pairs
+diverged by any position must not exceed the reference fraction at that position.
+
+Load and verify files on CPU without loading a model:
+
+```bash
+CUDA_VISIBLE_DEVICES="" .venv-tah/bin/python - <<'PY'
+import hashlib
+from tah.engine.fixtures import FixtureSuite
+suite = FixtureSuite('data/engine/fixtures/reference')
+assert suite.manifest['production_gates_eligible']
+for record in suite.records():
+    tensors = suite.load(record)
+    path = suite.root / record['file']
+    assert path.stat().st_size == record['bytes']
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == record['sha256']
+print(len(suite.manifest['records']), suite.manifest['total_fixture_bytes'])
+PY
+```
+
+`FixtureSuite(root, allow_partial=False)` rejects incomplete/failed manifests by
+default. `records(kind=None, checkpoint=None)` filters metadata lazily; `load(record)`
+returns CPU tensors and checks trace/pass-count shapes. Hash verification is
+explicit in the example. Use `allow_partial=True` for inspection only, and require
+`profile='full'`, `status='complete'` and `production_gates_eligible=true` for
+production gates.
+
 ## Cache-backed model tools
 
 The engine includes a persistent KV cache and attention primitives for library
