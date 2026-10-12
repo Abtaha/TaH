@@ -1,7 +1,8 @@
-"""Full-sequence, single-request TaH teacher forcing (no persistent KV).
+"""Full-sequence teacher forcing plus explicit persistent-cache entrypoints.
 
 Pass-local K/V histories implement the normative (position, depth) mask.
-There is deliberately no scheduler, slot pool, sampling or generation API.
+The full forward keeps only local histories. Cached execution delegates to the
+cache layer; scheduling, sampling and generation belong to the engine layer.
 """
 from __future__ import annotations
 
@@ -103,6 +104,16 @@ class TeacherForcedOutput:
 
 
 class EagerTaHModel(nn.Module):
+    def forward_cached(self, embeddings, position_ids, depths, slots, pool, attention, *, rotary=None):
+        """One persistent-cache pass per row; accepts mixed requests/depths."""
+        from .cached_model import forward_cached
+        return forward_cached(self, embeddings, position_ids, depths, slots, pool, attention, rotary=rotary)
+
+    def forward_chunk(self, input_ids, pool, request, **kwargs):
+        """Bounded eager teacher forcing; retains request KV between chunks."""
+        from .cached_model import forward_chunk
+        return forward_chunk(self, input_ids, pool, request, **kwargs)
+
     def __init__(self, config, tah_config):
         super().__init__()
         self.config, self.tah_config = config, tah_config
