@@ -180,7 +180,9 @@ def load_adapter(model, root, device, dtype):
     for name, parts in grouped.items():
         module = modules[name]
         if isinstance(module, Embedding):
-            raise ValueError("embedding-target LoRA is unsupported pending resolution of the reference's pre-disable embedding lookup; see WP3 BLOCKER")
+            raise ValueError("embedding-target LoRA is out of scope: adapters must target internal linear modules")
+        if name == "lm_head":
+            raise ValueError("lm_head LoRA is out of scope: adapters must target internal linear modules")
         rank = pattern_value(config.get("rank_pattern", {}), name, config.get("r", 8))
         alpha = pattern_value(config.get("alpha_pattern", {}), name, config.get("lora_alpha", 8))
         if not isinstance(rank, int) or rank < 1 or not math.isfinite(alpha):

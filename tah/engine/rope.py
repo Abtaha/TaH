@@ -79,7 +79,9 @@ class RotaryEmbedding(nn.Module):
         self.kind = (config["rope_scaling"] or {}).get("rope_type", (config["rope_scaling"] or {}).get("type", "default"))
         inv, self.attention_scaling = frequencies(config)
         self.register_buffer("inv_freq", inv, persistent=False)
-        self.register_buffer("original_inv_freq", inv.clone(), persistent=False)
+        # HF keeps the original frequencies as an ordinary fp32 tensor:
+        # model.to(bf16) casts inv_freq, but reset restores the fp32 original.
+        self.original_inv_freq = inv
         self.max_seq_len_cached = config["max_position_embeddings"]
 
     @torch.no_grad()
@@ -94,11 +96,13 @@ class RotaryEmbedding(nn.Module):
                     self.inv_freq, self.attention_scaling = frequencies(self.config, x.device, length)
                     self.max_seq_len_cached = length
                 if length < original and self.max_seq_len_cached > original:
+                    self.original_inv_freq = self.original_inv_freq.to(x.device)
                     self.inv_freq = self.original_inv_freq
                     self.max_seq_len_cached = original
             elif length > self.config.get("original_max_position_embeddings", original):
                 self.inv_freq, _ = frequencies(self.config, x.device, length)
             else:
+                self.original_inv_freq = self.original_inv_freq.to(x.device)
                 self.inv_freq = self.original_inv_freq
         with torch.autocast(device_type=x.device.type, enabled=False):
             freqs = (self.inv_freq[None, :, None].float() @ positions[None, None, :].float()).transpose(1, 2)

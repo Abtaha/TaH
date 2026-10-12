@@ -7,6 +7,7 @@ import gc
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,7 +18,8 @@ import yaml
 from tah.engine.fixtures import FixtureSuite
 from tah.engine.generate_fixtures import labels_for, load_reference
 from tah.engine.model import EagerTaHModel
-from tah.engine.parity import assert_gtf, compare_output, require_production
+from tah.engine.parity import (assert_gtf, compare_output, derive_decision_limits,
+                               gtf_summary, production_noise, require_production)
 from tah.engine.reference_capture import capture
 
 
@@ -47,8 +49,21 @@ def replay_layout(sequences, item, record):
 @pytest.mark.skipif(os.environ.get("CUDA_VISIBLE_DEVICES") == "", reason="CUDA hidden: binding G-TF requires GPU production fixtures")
 @pytest.mark.parametrize("name", ["real", "mlp3", "mlp1", "label3"])
 def test_gtf_every_wp2_fixture_set(name):
+    started = time.monotonic()
+    torch.set_num_threads(4)
     suite = FixtureSuite(os.environ.get("TAH_GTF_FIXTURES", "data/engine/fixtures/reference"))
     require_production(suite)
+    tolerances_path = Path(os.environ.get("TAH_GTF_TOLERANCES", "data/engine/wp2/tolerances.json"))
+    noise = production_noise(suite, name, json.loads(tolerances_path.read_text()))
+    limits = derive_decision_limits(noise)
+    destination = Path(os.environ.get("TAH_GTF_RESULTS", "data/engine/wp3/gtf"))
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / f"{name}-limits.json").write_text(json.dumps({
+        "decision_limits": limits, "noise_limits": noise,
+        "wp2_tolerances_sha256": sha256(tolerances_path),
+        "manifest_sha256": sha256(suite.root / "manifest.json"),
+        "margin_convention": "maximum absolute threshold distance across both reference probabilities at each common-visited flip",
+    }, indent=2))
     metadata = suite.manifest["checkpoints"][name]
     root = Path(metadata["path"])
     for file, info in metadata["files"].items():
@@ -58,6 +73,7 @@ def test_gtf_every_wp2_fixture_set(name):
     eval_config = Path(suite.manifest["eval_config"]["path"])
     assert sha256(eval_config) == suite.manifest["eval_config"]["sha256"]
     override = yaml.safe_load(eval_config.read_text()) if name == "real" else None
+    torch.cuda.reset_peak_memory_stats()
     engine = EagerTaHModel.from_pretrained(root, override, device="cuda")
     oracle = load_reference(SimpleNamespace(device="cuda", eval_config=eval_config), name, root)
     sequences = json.loads((suite.root / "inputs.json").read_text())["sequences"]
@@ -90,15 +106,27 @@ def test_gtf_every_wp2_fixture_set(name):
             rows.append(row)
             del trace, full_logits, replay, stored
         del output, template
-    noise = suite.manifest["self_noise"][name]["teacher_forced"]["summary"]
-    stats = assert_gtf(rows, noise)
-    destination = Path(os.environ.get("TAH_GTF_RESULTS", "data/engine/wp3/gtf"))
-    destination.mkdir(parents=True, exist_ok=True)
-    (destination / f"{name}.json").write_text(json.dumps({
+        print(f"G-TF {name}/{item['id']}: {len(records)} layouts; {time.monotonic() - started:.1f}s", flush=True)
+    stats = gtf_summary(rows)
+    report = {
         "gate": "G-TF", "production_gates_eligible": True,
         "device": torch.cuda.get_device_name(), "summary": stats,
-        "noise_limits": noise, "comparisons": rows,
-    }, indent=2))
+        "decision_limits": limits, "noise_limits": noise, "comparisons": rows,
+        "elapsed_seconds": time.monotonic() - started,
+        "peak_gpu_allocated_bytes": torch.cuda.max_memory_allocated(),
+        "peak_gpu_reserved_bytes": torch.cuda.max_memory_reserved(),
+        "wp2_tolerances_sha256": sha256(tolerances_path),
+        "manifest_sha256": sha256(suite.root / "manifest.json"),
+    }
+    try:
+        assert_gtf(rows, noise)
+    except AssertionError:
+        report["status"] = "FAIL"
+        raise
+    else:
+        report["status"] = "PASS"
+    finally:
+        (destination / f"{name}.json").write_text(json.dumps(report, indent=2))
     del engine, oracle
     gc.collect()
     torch.cuda.empty_cache()

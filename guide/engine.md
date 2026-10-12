@@ -113,13 +113,19 @@ Full-vocabulary self-noise is measured at every position during capture, althoug
 only sampled dense rows are stored. Use reference replay for exhaustive logit
 checks, or the separately recorded retained-coordinate metrics for disk-only
 checks. Never compare independent top-k rank lists as if they had equal indices.
-G-TF limits are 1.5 times the measured error or top-1 disagreement rate, with no
-epsilon floor; per-depth decision agreement must still be at least 99.5%, and
-every mismatch must be within 0.01 of the effective threshold. Greedy divergence
-positions are zero-based; `null` means identical IDs and EOS length. Compare
-divergence distributions using the same prompt/layout cohort, treating identical
-pairs as infinite first-divergence positions. An engine's fraction of pairs
-diverged by any position must not exceed the reference fraction at that position.
+G-TF limits use the production reference self-noise of the same checkpoint.
+Full-logit MAE/RMSE/max error and top-1 disagreement must be within the recorded
+1.5× limits, with no epsilon floor. At each depth, decision flips are counted
+only on positions visited by both implementations; their rate must be at most
+1.5× the reference rate. Pass-count mismatch rate has its own 1.5× reference
+limit, covering later visitation differences. A zero reference rate requires
+an exact match. Every flip must lie within `max(0.01, 1.5×largest reference flip
+margin)` of the effective threshold. Calibration and comparison measure both
+probabilities at a flip, so reversing a pair does not change its margin.
+Greedy divergence positions are zero-based; `null` means identical IDs and EOS
+length. For G-GEN, identical outputs count as their generation length; the
+candidate median first divergence must be at least half the reference median,
+and position-zero divergence is allowed only if present in reference self-noise.
 
 Load and verify files on CPU without loading a model:
 
@@ -144,6 +150,86 @@ returns CPU tensors and checks trace/pass-count shapes. Hash verification is
 explicit in the example. Use `allow_partial=True` for inspection only, and require
 `profile='full'`, `status='complete'` and `production_gates_eligible=true` for
 production gates.
+
+## Full-sequence teacher forcing
+
+`EagerTaHModel` loads a local TaH v1 checkpoint into engine-owned modules and
+returns final logits for one complete sequence. It uses dense attention with
+temporary per-pass KV history, and keeps no KV between calls. Use this tool for
+validation; generation and scheduling are separate APIs still under development.
+The model runtime does not import Transformers or PEFT model code.
+
+```bash
+source .venv-tah/bin/activate
+CUDA_VISIBLE_DEVICES=0 python - <<'PY'
+from pathlib import Path
+import yaml
+from tah.engine.model import EagerTaHModel
+
+override = yaml.safe_load(Path('script/tah/recipes/qwen3_1.7/eval_tah.yaml').read_text())
+model = EagerTaHModel.from_pretrained('models/TaH-plus-1.7B', override, device='cuda')
+output = model([3, 7, 11], hidden_positions=[0, 2])
+print(output.logits.shape, output.iter_count.tolist())
+PY
+```
+
+`from_pretrained(model_path, config_override=None, *, device='cpu',
+dtype=torch.bfloat16)` accepts a local directory, an optional TaH-config
+dataclass or dictionary (including an evaluation YAML dictionary), a torch
+device, and BF16/FP16/FP32 dtype. It does not download models. Nonempty override
+fields replace saved fields; None and empty dictionaries retain saved values.
+LoRA targets must be internal linear modules; embedding and `lm_head` adapters
+are rejected. Unsupported model/adapter variants and missing or inconsistent
+weights raise explicit errors. The saved adapter config determines rank/scaling.
+Default, linear, dynamic NTK, YaRN, LongRoPE and Llama 3 RoPE scaling are
+supported; dynamic/LongRoPE growth and short-sequence resets preserve the
+reference frequency precision after a model dtype/device cast.
+
+`model(input_ids, *, iter_count_labels=None, position_ids=None,
+hidden_positions=None)` requires a nonempty 1D int64 sequence in vocabulary
+range. Integer lists are accepted and moved to the model device. Labels are
+optional per-token int64 iteration labels; the label decider stops after one
+pass when absent. Positions default to `0..T-1`; supplied positions must be
+nonnegative int64 with the input shape. Hidden positions select local sequence
+indices and default to none. The output has the same fields described for
+cached teacher forcing below, with `T` in place of chunk length. All logits and
+probabilities retain the model dtype; unvisited diagnostics are NaN.
+
+## Production teacher-forced parity check
+
+After production fixture capture completes, run each checkpoint independently:
+
+```bash
+source .venv-tah/bin/activate
+for checkpoint in real mlp3 mlp1 label3; do
+  CUDA_VISIBLE_DEVICES=0 python -m pytest -q -s -o addopts= -m 'gpu and slow' \
+    "tah/engine/tests/test_gtf.py::test_gtf_every_wp2_fixture_set[${checkpoint}]" || break
+done
+```
+
+This verifies checkpoint/reference/config/record hashes, tests all five saved
+teacher-forced layouts for each sequence, and replays the unchanged reference
+for full-vocabulary errors. Incomplete or tiny fixtures are rejected. Empty
+CUDA visibility skips these GPU tests; `-o addopts=` enables the slow cases.
+
+| Environment variable | Default / behavior |
+| --- | --- |
+| `TAH_GTF_FIXTURES` | `data/engine/fixtures/reference`; complete production fixture root. |
+| `TAH_GTF_TOLERANCES` | `data/engine/wp2/tolerances.json`; reference limits export with matching manifest hash. Its legacy fixed-decision fields are superseded by decision limits derived from saved reference trace pairs. |
+| `TAH_GTF_RESULTS` | `data/engine/wp3/gtf`; creates the report directory. |
+
+`<checkpoint>-limits.json` records decision limits and the unchanged logit
+limits before model comparison, together with input hashes and the margin
+convention. `<checkpoint>.json` records PASS/FAIL, aggregate and per-layout
+metrics, common-visited flip counts/rates/margins, pass-count mismatch rate,
+noise/decision limits, GPU name, elapsed seconds and peak allocated/reserved
+GPU bytes. Read binding limits from `noise_limits` and `decision_limits`;
+`g_tf_*_limit` fields inherited in the measured `summary` rescale engine errors
+and do not define the binding bounds. A completed comparison writes its metrics even when a gate fails;
+an earlier loading/integrity/runtime error may leave only the limits report
+and pytest traceback. Retained top-k/dense errors are also checked against
+their separately measured reference limits. No CPU development report is a
+production gate.
 
 ## Cache-backed model tools
 

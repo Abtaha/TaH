@@ -107,7 +107,7 @@ CASES = [
     dict(max_iter=1, label=False, tied=False), dict(max_iter=2, label=False),
     dict(max_iter=5, label=False, normalize=True, layers=3),
     dict(max_iter=5, patterns=True, bias=True, targets="all-linear", tied=False),
-    dict(max_iter=4, targets=["lm_head", "k_proj", "o_proj", "gate_proj", "up_proj"]),
+    dict(max_iter=4, targets=["k_proj", "o_proj", "gate_proj", "up_proj"]),
     dict(max_iter=3, rope={"rope_type": "linear", "factor": 2.}),
     dict(max_iter=3, rope={"rope_type": "dynamic", "factor": 2.}),
     dict(max_iter=3, rope={"rope_type": "yarn", "factor": 2.}),
@@ -217,6 +217,12 @@ def test_embedding_target_fails_loudly_pending_semantics_resolution(tmp_path):
         "top1_mismatches": int((first.argmax(-1) != second.argmax(-1)).sum()),
         "cause": "reference embeds before disabling LoRA, so pass-1 input depends on prior adapter state",
     }, indent=2))
+
+
+def test_lm_head_target_is_rejected(tmp_path):
+    reference(tmp_path, targets=["lm_head", "q_proj"])
+    with pytest.raises(ValueError, match="lm_head LoRA is out of scope"):
+        EagerTaHModel.from_pretrained(tmp_path)
 
 
 def test_row_masked_delta_and_runtime_imports(tmp_path):
