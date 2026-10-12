@@ -1,23 +1,209 @@
 # TaH inference engine
 
-The new TaH v1 inference engine in `tah/engine/` is **under development**.
-Environment/kernel checks and model, checkpoint, fixture, and sampling
-components, persistent KV storage, and cached attention exist, but a complete generation engine and evaluation backend
-are not available yet. The evaluation CLI currently accepts only `tah`, `hf`,
-and `sglang`.
+`TaHEngine` provides experimental eager generation for local TaH v1 checkpoints on one
+CUDA GPU. It runs all prompt passes in bounded chunks, mixes token depths in
+decode, and admits queued requests as completed requests free capacity. CUDA
+graph generation and the evaluation CLI's `tah_engine` backend are still pending;
+the evaluation CLI accepts `tah`, `hf`, and `sglang`.
 
-It is intended to provide fast single-GPU inference for TaH v1 checkpoints,
-with selective per-token passes, bounded chunked prefill, continuous batching,
-managed KV memory, CUDA graph decode, and sampling with per-request seeds.
-Planned results include generated tokens/text, prompt and generation pass
-counts, finish reasons, and timing. API details and runnable generation
-examples will be documented here when implemented; no generation API is
-promised by this placeholder.
+Generated-sequence reference parity, greedy sanity checks and production swap/
+long-context robustness checks pass on the RTX 3090. Eager W-perf with 64 resident
+requests measures 962.81 generated tokens/s versus 78.26 for the reference baseline.
+End-to-end accuracy evaluation and L40S validation remain later validation steps.
 
-Use [installation](installation.md) for the existing `engine` extra and
-environment/kernel checks, and [evaluation](evaluation.md) for the shipped
-reference `tah` backend. TaH2's bundled `tah2/minisgl/` is a separate engine;
-see the main [README](../README.md#tah2-usage) for its usage.
+Use [installation](installation.md) for the `engine` extra and prerequisites,
+and [evaluation](evaluation.md) for the reference backend. TaH2's bundled
+`tah2/minisgl/` is a separate engine.
+
+## Generate with the eager engine
+
+Run from the repository root in the frozen environment:
+
+```bash
+source .venv-tah/bin/activate
+CUDA_VISIBLE_DEVICES=0 python - <<'PY_ENGINE'
+import yaml
+from tah.engine import TaHEngine, Request, SamplingParams
+
+config = yaml.safe_load(open('script/tah/recipes/qwen3_1.7/eval_tah.yaml'))
+engine = TaHEngine('models/TaH-plus-1.7B', config_override=config)
+requests = [Request('<|im_start|>user\nWhat is 2 + 2?<|im_end|>\n<|im_start|>assistant\n',
+                    max_new_tokens=128, seed=42)]
+results = engine.generate(requests, SamplingParams(temperature=.6, top_k=20, top_p=.95),
+                          on_result=lambda result: print(result.text))
+print(results[0].generated_pass_counts)
+print(engine.last_run)
+PY_ENGINE
+```
+
+`generate(requests, sampling=None, on_result=None)` returns `Result` objects in
+input order. Each callback receives one `Result` as it finishes; completion order
+may differ from input order. The call is blocking and cannot be nested or called
+concurrently on the same engine. A callback exception propagates after request
+KV and live host swap buffers are released.
+
+Each request may be a token-ID list, a raw string, or `Request(prompt,
+max_new_tokens=1024, seed=0)`. Strings are tokenized with the checkpoint's
+`tokenizer.json`; apply a chat template yourself, as in the example. No model
+code from Transformers or PEFT is imported at generation runtime. A checkpoint
+without a tokenizer accepts token IDs and returns empty result text. Plain
+strings/lists use the engine's `max_new_tokens` and seed plus input index.
+
+`sampling` accepts one `SamplingParams` or dictionary shared by all requests,
+or a list with one entry per request. The default is temperature 1, min_p 0,
+top_k 0, top_p 1, do_sample True. Temperature 0 or do_sample False selects greedy
+argmax. See the sampling section below for filtering and cutoff rules. A seed
+is a signed 64-bit integer; its draw counter belongs to the request and survives
+swapping. Repeat a call with the same seeds and batch composition for identical
+outputs.
+
+Each `Result` has `request_id` (input index), `token_ids`, `text`,
+`prompt_pass_counts`, `generated_pass_counts`, `finish_reason` (`eos` or
+`length`), and `timing`. Generated counts describe the context position whose
+final logits sampled that output token. EOS and its count are excluded, exactly
+as in reference generation; the EOS ID comes from the tokenizer, rather than
+an expanded generation-config stop list. `max_new_tokens=0` still computes
+prompt counts and returns an empty output. Timing contains `total_seconds`
+(including queue time), `queue_seconds`, `prefill_seconds`, and `swaps`.
+
+Constructor options (keyword-only):
+
+| Option | Default | Effect |
+|---|---|---|
+| `device` | `"cuda"` | GPU device; `"cpu"` is development only and requires explicit KV capacity. |
+| `max_batch_size` | 128 | Maximum resident sequences contributing one row per decode step. |
+| `prefill_chunk_size` | 128 | Maximum prompt tokens with live vocabulary logits. |
+| `memory_fraction` | .9 | Fraction of measured free GPU memory after loading weights available for KV and workspace reservations. |
+| `kv_capacity` | `None` | Auto-size page-size-one KV entries across all passes; an explicit larger-than-safe capacity is rejected. |
+| `admission_headroom` | .1 | Fraction of KV slots that must remain free after worst-case prefill, in addition to running-row growth. |
+| `host_swap_bytes` | 8 GiB | Live pinned-host swap payload/ledger budget; exceeding it raises `KVCapacityError`. |
+| `swap_chunk_entries` | 256 | Maximum KV entries in shared device swap scratch; swaps never gather a whole request on device. |
+| `max_new_tokens` | 1024 | Generation cap for plain string/token-list requests. |
+| `seed` | 0 | Base seed for plain requests; each input adds its index. |
+| `eos_token_id` | `"tokenizer"` | Read tokenizer EOS; set an integer explicitly or `None` to disable EOS stopping. |
+| `sampling_topk` | 128 | Bounded shortlist limit; sampling with k=0 or larger k uses the general full-vocabulary path. |
+| `compile` | `False` | Eager mode; `True` currently raises an actionable error. |
+| `profile_steps` | 0 | Collect CUDA stream-event and host timings for the first specified decode steps. Stream events include launch gaps; use the profiler tool below for kernel execution time. |
+
+`config_override` follows the checkpoint loader's reference-compatible TaH
+merge rules documented below. KV sizing budgets both 128 MiB attention float
+workspaces, private FlashInfer integer workspaces for every possible exact batch
+size, shared ragged metadata, geometrically grown request tables, logits/input
+state, model/sampling intermediates, bounded swap scratch, and allocator margin.
+`engine.memory_budget` exposes the measured free bytes, reservations and resulting
+capacity. Memory scales with real request tokens; prefill does not pad short
+prompts to the longest request.
+
+Admission reserves the entire prompt's worst-case passes and the next pass of
+every running row before execution. If growth runs out of slots, the newest
+resident request swaps its KV, cumulative logits, next input embedding and RNG
+state to pinned host memory. Its host scheduler state is frozen. Restoration is
+FIFO by preemption time; new admission is blocked while any request is swapped.
+There is no recompute path. Requests exceeding the model context, the worst-case
+prefill capacity/headroom, or the actual single-request growth capacity fail
+clearly. Slot and swap ownership are released on success and on exceptions.
+
+`engine.last_run` reports wall seconds (excluding engine construction), generated
+tokens, tokens/s, decode steps, swap counts, blocked-admission steps, peak live
+host swap bytes, and optional per-step timing samples. Each CUDA decode step
+uses one status transfer to the host. Exact batch-size buckets keep fixed buffer
+shapes and a reusable unsplit FlashInfer plan; no per-step context-length scan
+runs in Python. Low batch sizes can leave the GPU underutilized in eager mode.
+
+## Engine validation and performance tools
+
+Run each checkpoint/gate as a separate process, with a 28-minute limit. These
+commands require the completed production fixtures and local checkpoint paths:
+
+```bash
+source .venv-tah/bin/activate
+CUDA_VISIBLE_DEVICES=0 python -m pytest -q tah/engine/tests/test_engine_gpu.py
+for checkpoint in real mlp3 mlp1 label3; do
+  CUDA_VISIBLE_DEVICES=0 timeout 28m python -m tah.engine.tests.engine_check \
+    --gate gen --checkpoint "$checkpoint" --output "data/engine/wp6/gen-$checkpoint.json"
+  CUDA_VISIBLE_DEVICES=0 timeout 28m python -m tah.engine.tests.generated_gtf \
+    --phase generate --checkpoint "$checkpoint"
+  CUDA_VISIBLE_DEVICES=0 timeout 28m python -m tah.engine.tests.generated_gtf \
+    --phase noise --checkpoint "$checkpoint"
+  CUDA_VISIBLE_DEVICES='' timeout 28m python -m tah.engine.tests.generated_gtf \
+    --phase compare --checkpoint "$checkpoint"
+done
+CUDA_VISIBLE_DEVICES=0 timeout 28m python -m tah.engine.tests.engine_check \
+  --gate perf --batch-size 64 --output data/engine/wp6/wperf.json
+CUDA_VISIBLE_DEVICES=0 timeout 28m python -m tah.engine.tests.engine_check \
+  --gate robust --batch-size 64 --max-new-tokens 16384 --output data/engine/wp6/robust.json
+CUDA_VISIBLE_DEVICES=0 timeout 28m python -m tah.engine.tests.engine_check \
+  --gate long-prompt --max-new-tokens 8 --output data/engine/wp6/long-prompt.json
+CUDA_VISIBLE_DEVICES=0 python -m tah.engine.tests.engine_check \
+  --gate swap --output data/engine/wp6/forced-swap.json
+CUDA_VISIBLE_DEVICES=0 python -m tah.engine.tests.engine_check \
+  --gate profile --batch-size 64 --output data/engine/wp6/profile-b64.json
+```
+
+Tool options: `--gate` is required (`gen`, `tf`, `perf`, `robust`, `long-prompt`,
+`swap`, `profile`); `--output` is the required JSON destination; `--checkpoint` chooses
+`real` (default), `mlp3`, `mlp1`, or `label3` for parity; `--batch-size` defaults
+to 128 for workload/profile runs; `--max-new-tokens` defaults to 4096 for
+workloads; `--start`/`--end` select the expanded 128-prompt workload range
+(default 0/128); `--memory-fraction` defaults to .9 for workload runs.
+`--profile-context` defaults to 2048: profile with repeated real prompts at that
+context length; set 0 to use the original prompt lengths. Greedy parity
+uses the six saved prompts with a 256-token cap. `engine_check --gate tf` retains
+the earlier fixture-limit diagnostic; use the separate ordered generated-corpus
+commands above for the current generated-sequence gate.
+
+`generated_gtf` requires `--phase` (`generate`, `noise`, `compare`) and
+`--checkpoint` (`real`, `mlp3`, `mlp1`, `label3`). `--root` defaults to
+`data/engine/wp6`; `--min-generated-positions` defaults to 8192 and controls
+corpus generation. Comparisons require at least 8192 processed generated
+positions per checkpoint. Generation repeats the six prompts in groups of six
+with distinct request seeds and the same temperature .6, top_k 20, top_p .95
+sampling settings; the original real-checkpoint six sequences are reproduced
+and checked against the saved `tf-real.json`.
+
+Generation saves the corpus manifest, token IDs and observed engine traces under
+`gtf-corpus/<checkpoint>/`. The noise phase reads token IDs and computes
+reference-only layout A versus B before any engine comparison: A uses singleton
+prompt chunks of 128 and cached single-token decode; B uses a batched, left-padded
+full prompt with aligned cached decode, retaining completed rows with EOS-filled
+tails for batch shape and excluding those tails from metrics. It saves layout A
+traces and preregisters `gtf-limits/<checkpoint>.json`. The compare phase verifies
+corpus/oracle/source hashes, consumes those saved limits, and writes
+`tf-<checkpoint>-expanded.json` with PASS/FAIL, decisions, pass-count and
+full/retained-logit metrics. Neither calibration nor comparison overwrites an
+existing corpus or limit registration; choose a new root for an independent run.
+Earlier failing reports remain separate evidence.
+
+Generated-corpus limits are 1.5 times the measured reference-only errors/rates.
+MLP decision/pass-count reference counts of zero or one use the specified floor
+of two; IterLabel and depth caps remain exact. Margin uses the maximum distance
+from threshold on both sides of a reference flip, with the .01 minimum. Fixture
+validation continues using its original measured limits.
+
+`reference_capture.capture` accepts optional `chunk_boundaries`: strictly
+increasing padded-column boundaries from 0 to the padded input width. Optional
+`prompt_lengths` aligns left-padded prompt prefixes and their subsequent decode
+positions when replaying generated batches. Invalid values raise `ValueError`;
+default fixture capture behavior is unchanged.
+
+`--gate swap` checks production-weight output/pass-count identity across a
+forced mid-generation swap and immediate restoration at unchanged batch
+composition, then audits KV and host swap cleanup.
+
+The workload tool reconstructs Math500 prompts from the saved reference
+W-perf samples and tokenizer's chat template, then repeats each prompt twice.
+Construction and a warmup run are excluded from measured wall time. A report
+contains request results, memory reservations/peaks, KV audit, live host swap
+bytes, tokens/s and the reference 78.26 tokens/s baseline. Split workload ranges
+when necessary to keep each invocation bounded; report the sum of tokens divided
+by the sum of measured times, and label batching differences. Long-prompt mode
+uses one 16,384-token prompt plus 32 short requests. Profile mode counts actual CUDA activities once, cross-checks them against
+the saved trace, reports CUDA kernel and copy time separately, and saves
+an inspectable `.trace.json` beside the report. It also records unprofiled step
+wall times. The profiler records the first eleven decode steps after actual
+model prefill, with admission headroom set to zero for this diagnostic; observed
+batch sizes are recorded in the report. Prefill is excluded from the trace. The profiled wall-minus-device residual includes Python/launch gaps
+and profiler overhead, with overlap caveats.
 
 ## Reference parity fixtures
 

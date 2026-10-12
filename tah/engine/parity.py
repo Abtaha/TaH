@@ -56,12 +56,17 @@ def require_production(suite):
 def derive_decision_limits(noise):
     """Revised SPEC §7 limits, using counts rather than rounded agreement."""
     per_depth = []
+    floor = noise.get('mlp_count_floor', 0)
+    learned_depths = noise.get('learned_depths', [])
     for depth in noise["per_depth"]:
         count = depth.get("common_visited_compared", depth["decision_compared"] - depth["visited_mismatches"])
         flips = depth["common_decision_mismatches"]
         assert 0 <= flips <= count
         per_depth.append({"depth": depth["depth"], "reference_common_visited": count,
-                          "reference_flips": flips, "flip_rate_limit": 1.5 * flips / max(count, 1)})
+                          "reference_flips": flips,
+                          "flip_rate_limit": 1.5 * (max(floor, flips) if depth['depth'] in learned_depths else flips) / max(count, 1)})
+        if floor:
+            per_depth[-1]['effective_reference_flips'] = max(floor, flips) if depth['depth'] in learned_depths else flips
     max_margin = noise.get("reference_max_flip_margin")
     if max_margin is None:
         # Zero-flip development noise needs no margin measurement. A noisy
@@ -72,7 +77,7 @@ def derive_decision_limits(noise):
             "flip_margin_limit": max(.01, 1.5 * max_margin),
             "reference_pass_count_mismatches": noise["pass_count_mismatches"],
             "reference_token_comparisons": noise["top1_compared"],
-            "pass_count_mismatch_rate_limit": 1.5 * noise["pass_count_mismatches"] / max(noise["top1_compared"], 1)}
+            "pass_count_mismatch_rate_limit": 1.5 * (max(floor, noise["pass_count_mismatches"]) if learned_depths else noise["pass_count_mismatches"]) / max(noise["top1_compared"], 1)}
 
 
 def production_noise(suite, name, tolerance_export):

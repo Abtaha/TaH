@@ -45,3 +45,32 @@ def pack_visible(slots, pos, depths, starts, lengths, query_pos, query_depth,
         slot = tl.load(slots + start + offset, offset < length, other=0)
         tl.store(indices + dest + rank, slot, valid)
         dest += tl.sum(valid.to(tl.int32), 0)
+
+
+@triton.jit
+def stage_sources(descriptors, slots, positions, depths, starts, lengths,
+                  query_pos, query_depth, STREAMS: tl.constexpr, BLOCK: tl.constexpr):
+    """One launch copies ragged device tables described by O(B*N) pointers.
+
+    Pointer ownership/lifetime is retained by the bucket's live request handles.
+    Reprepare descriptors after table growth/relocation, before using a graph.
+    """
+    row = tl.program_id(0)
+    descriptor = descriptors + row * (3 * STREAMS + 4)
+    dest = tl.load(descriptor + 3 * STREAMS)
+    tl.store(starts + row, dest)
+    tl.store(lengths + row, tl.load(descriptor + 3 * STREAMS + 1))
+    tl.store(query_pos + row, tl.load(descriptor + 3 * STREAMS + 2))
+    tl.store(query_depth + row, tl.load(descriptor + 3 * STREAMS + 3))
+    lane = tl.arange(0, BLOCK)
+    for stream in range(STREAMS):
+        source_slots = tl.cast(tl.load(descriptor + stream), tl.pointer_type(tl.int32))
+        source_pos = tl.cast(tl.load(descriptor + STREAMS + stream), tl.pointer_type(tl.int64))
+        size = tl.load(descriptor + 2 * STREAMS + stream)
+        for base in range(0, size, BLOCK):
+            offset = base + lane
+            mask = offset < size
+            tl.store(slots + dest + offset, tl.load(source_slots + offset, mask, other=0), mask)
+            tl.store(positions + dest + offset, tl.load(source_pos + offset, mask, other=0), mask)
+            tl.store(depths + dest + offset, stream + 1, mask)
+        dest += size

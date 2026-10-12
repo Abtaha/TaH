@@ -25,17 +25,20 @@ from tah.model.tah_model import TaHForCausalLM, _resolve_tah_config
 
 @pytest.fixture(autouse=True)
 def cpu_only(monkeypatch):
+    initialized_before = torch.cuda.is_initialized()
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
     torch.set_num_threads(2)
     def forbidden(*args, **kwargs):
         raise AssertionError("WP3 CPU tests must not initialize CUDA")
     monkeypatch.setattr(torch.cuda, "_lazy_init", forbidden)
+    yield
+    assert torch.cuda.is_initialized() == initialized_before, "CPU test changed CUDA initialization state"
 
 
 def reference(tmp_path, *, max_iter=3, label=True, normalize=False, targets=None,
-              patterns=False, bias=False, tied=True, rope=None, layers=2, activation="silu"):
+              patterns=False, bias=False, tied=True, rope=None, layers=2, activation="silu", head_dim=8):
     torch.manual_seed(711)
-    cfg = Qwen3Config(vocab_size=97, hidden_size=32, intermediate_size=64, head_dim=8,
+    cfg = Qwen3Config(vocab_size=97, hidden_size=32, intermediate_size=64, head_dim=head_dim,
                       num_attention_heads=4, num_key_value_heads=2, num_hidden_layers=layers,
                       attention_bias=bias, tie_word_embeddings=tied, rope_scaling=rope,
                       max_position_embeddings=16, hidden_act=activation)
@@ -133,7 +136,6 @@ def test_constructor_generality(tmp_path, options):
     # No hidden persistent KV/history or pass-dependent adapter toggle.
     repeated = engine(ids, iter_count_labels=labels)
     assert torch.equal(repeated.logits, out.logits)
-    assert not torch.cuda.is_initialized()
 
 
 def test_override_precedence_external_decider_and_eval_label(tmp_path):

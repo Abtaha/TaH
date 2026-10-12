@@ -92,4 +92,17 @@ def check_environment() -> None:
 if os.environ.get("CUDA_VISIBLE_DEVICES") != "":
     check_environment()
 
-__all__ = ["check_environment"]
+def __getattr__(name):
+    if name == 'TaHEngine':
+        from .engine import TaHEngine
+        return TaHEngine
+    if name in ('Request', 'Result'):
+        from . import scheduler
+        return getattr(scheduler, name)
+    if name == 'SamplingParams':
+        from .sampling import SamplingParams
+        return SamplingParams
+    raise AttributeError(name)
+
+
+__all__ = ["check_environment", "TaHEngine", "Request", "Result", "SamplingParams"]

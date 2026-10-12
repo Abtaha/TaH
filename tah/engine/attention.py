@@ -43,38 +43,56 @@ def _sdpa(q, cache, ids, mask=None):
 
 class DecodeBucket:
     def __init__(self, pool, batch_size, max_entries, num_q_heads, *,
-                 workspace_bytes=128 * 1024 * 1024):
+                 workspace_bytes=128 * 1024 * 1024, workspace=None, static_plan=False, buffers=None):
         if batch_size < 1 or max_entries < batch_size or max_entries >= 2**31 or num_q_heads < 1 or num_q_heads % pool.values.shape[-2]:
             raise ValueError("invalid decode bucket dimensions/GQA ratio")
         self.pool, self.batch_size, self.max_entries = pool, batch_size, max_entries
         self.num_q_heads = num_q_heads
         device = pool.device
-        def empty(n, dtype=torch.int32):
+        def empty(name, n, dtype=torch.int32):
+            if buffers is not None:
+                return buffers[name][:n]
             return torch.empty(n, dtype=dtype, device=device)
-        self.source_slots = empty(max_entries)
-        self.source_pos = empty(max_entries, torch.long)
-        self.source_depth = empty(max_entries)
-        self.starts, self.lengths = empty(batch_size), empty(batch_size)
-        self.query_pos, self.query_depth = empty(batch_size, torch.long), empty(batch_size)
-        self.counts = empty(batch_size)
-        self.indptr = empty(batch_size + 1)
-        self.indices = empty(max_entries)
+        self.source_slots = empty('source_slots', max_entries)
+        self.source_pos = empty('source_pos', max_entries, torch.long)
+        self.source_depth = empty('source_depth', max_entries)
+        self.starts, self.lengths = empty('starts', batch_size), empty('lengths', batch_size)
+        self.query_pos, self.query_depth = empty('query_pos', batch_size, torch.long), empty('query_depth', batch_size)
+        self.counts = empty('counts', batch_size)
+        self.indptr = empty('indptr', batch_size + 1)
+        self.indices = empty('indices', max_entries)
         self.last = torch.ones(batch_size, dtype=torch.int32, device=device)
-        self.output = torch.empty(batch_size, num_q_heads, pool.values.shape[-1], device=device, dtype=pool.dtype)
+        self.output = (buffers['output'][:batch_size] if buffers is not None else
+                       torch.empty(batch_size, num_q_heads, pool.values.shape[-1], device=device, dtype=pool.dtype))
+        self.descriptors = (buffers['descriptors'][:batch_size] if buffers is not None else
+                            torch.empty(batch_size, 3 * pool.max_iter + 4, dtype=torch.long, device=device))
         self.wrapper = None
         self.rows = None
+        self.static_plan = static_plan
         if device.type == "cuda":
             import flashinfer
-            self.workspace = torch.empty(workspace_bytes, dtype=torch.uint8, device=device)
+            self.workspace = workspace if workspace is not None else torch.empty(workspace_bytes, dtype=torch.uint8, device=device)
             self.wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-                self.workspace, "NHD", use_cuda_graph=True,
+                self.workspace, "NHD", use_cuda_graph=not static_plan,
                 paged_kv_indptr_buffer=self.indptr,
                 paged_kv_indices_buffer=self.indices,
                 paged_kv_last_page_len_buffer=self.last)
+            if static_plan:
+                # A one-page non-graph plan has no split-KV tiles: one CTA per
+                # request/head reads the LIVE indptr. Its launch shape depends
+                # only on B, never context lengths. plan() itself stays outside
+                # capture; run() remains capturable. FlashInfer 0.2.5 contract.
+                self.wrapper.plan(torch.arange(batch_size + 1, dtype=torch.int32),
+                    self.indices, torch.ones(batch_size, dtype=torch.int32),
+                    num_q_heads, pool.values.shape[-2], pool.values.shape[-1], 1,
+                    q_data_type=pool.dtype, kv_data_type=pool.dtype)
+                assert not self.wrapper._plan_info[-1], "static decode requires an unsplit FlashInfer plan"
+                self.indptr = self.wrapper._paged_kv_indptr_buf
+                self.last = self.wrapper._paged_kv_last_page_len_buf
 
     @torch.inference_mode()
     def prepare(self, rows):
-        """Host admission metadata + O(B*N) device copies, outside capture.
+        """Host O(B*N) descriptors + one ragged staging launch, outside capture.
 
         Host planning counts use bisect on the allocation ledger (O(log T) per
         stream), with no device-to-host sync. Device kernels independently count
@@ -88,26 +106,43 @@ class DecodeBucket:
         if required > self.max_entries:
             raise ValueError("ragged decode metadata exceeds bucket capacity; reserve a larger bucket outside capture")
         starts, lengths, counts = [], [], []
+        descriptors = []
         offset = 0
         for row in rows:
             starts.append(offset)
             lengths.append(row.request.size)
             counts.append(self.pool.visible_count(row.request, row.position, row.depth))
+            tables = row.request.streams
+            descriptors.append([*[t.slots.data_ptr() for t in tables],
+                                *[t.positions.data_ptr() for t in tables],
+                                *[t.size for t in tables], offset, row.request.size,
+                                row.position, row.depth])
             for depth, table in enumerate(row.request.streams, 1):
                 end = offset + table.size
-                self.source_slots[offset:end].copy_(table.slots[:table.size])
-                self.source_pos[offset:end].copy_(table.positions[:table.size])
-                self.source_depth[offset:end].fill_(depth)
+                if self.pool.device.type != 'cuda':
+                    self.source_slots[offset:end].copy_(table.slots[:table.size])
+                    self.source_pos[offset:end].copy_(table.positions[:table.size])
+                    self.source_depth[offset:end].fill_(depth)
                 offset = end
-        for dest, values in ((self.starts, starts), (self.lengths, lengths),
-                             (self.query_pos, [r.position for r in rows]),
-                             (self.query_depth, [r.depth for r in rows])):
-            dest.copy_(torch.tensor(values, dtype=dest.dtype))
+        if self.pool.device.type == 'cuda':
+            from .attention_kernels import stage_sources
+            # Fresh pinned tensor: its allocator tracks the asynchronous DMA;
+            # it cannot be overwritten while a prior transfer still reads it.
+            host_descriptors = torch.tensor(descriptors, dtype=torch.long, pin_memory=True)
+            self.descriptors.copy_(host_descriptors, non_blocking=True)
+            stage_sources[(self.batch_size,)](self.descriptors, self.source_slots,
+                self.source_pos, self.source_depth, self.starts, self.lengths,
+                self.query_pos, self.query_depth, STREAMS=self.pool.max_iter, BLOCK=256)
+        else:
+            for dest, values in ((self.starts, starts), (self.lengths, lengths),
+                                 (self.query_pos, [r.position for r in rows]),
+                                 (self.query_depth, [r.depth for r in rows])):
+                dest.copy_(torch.tensor(values, dtype=dest.dtype))
         host_ptr = torch.tensor([0, *torch.tensor(counts).cumsum(0).tolist()], dtype=torch.int32)
         self.rows = tuple(rows)
         self.revisions = tuple(r.request.revision for r in rows)
         self.build()
-        if self.wrapper is not None:
+        if self.wrapper is not None and not self.static_plan:
             # CPU indptr/last avoid FlashInfer's hidden device->host transfers.
             self.wrapper.plan(host_ptr, self.indices, torch.ones(self.batch_size, dtype=torch.int32),
                 self.num_q_heads, self.pool.values.shape[-2], self.pool.values.shape[-1], 1,
@@ -164,7 +199,7 @@ class PrefillAttention:
     Query order is retained: consecutive groups may refer to the same request.
     Workspace/masks sum actual group sizes; no B*longest-request dimension.
     """
-    def __init__(self, pool, rows, num_q_heads, *, workspace_bytes=128 * 1024 * 1024):
+    def __init__(self, pool, rows, num_q_heads, *, workspace_bytes=128 * 1024 * 1024, workspace=None):
         validate_rows(pool, rows)
         if num_q_heads < 1 or num_q_heads % pool.values.shape[-2]:
             raise ValueError("invalid prefill GQA ratio")
@@ -190,7 +225,7 @@ class PrefillAttention:
             import flashinfer
             qo = torch.tensor([0, *[g[1] for g in self.groups]], dtype=torch.int32)
             kv = torch.tensor([0, *torch.tensor([len(g[2]) for g in self.groups]).cumsum(0).tolist()], dtype=torch.int32)
-            self.workspace = torch.empty(workspace_bytes, dtype=torch.uint8, device=pool.device)
+            self.workspace = workspace if workspace is not None else torch.empty(workspace_bytes, dtype=torch.uint8, device=pool.device)
             self.wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(self.workspace, "NHD")
             # FlashInfer 0.2.5 segment_packbits requires DEVICE mask pointers.
             # Prefill planning may synchronize; it is outside decode/capture.

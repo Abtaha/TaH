@@ -8,15 +8,26 @@ from __future__ import annotations
 import torch
 
 
-def pack(sequences, pad_id, device, *, side="left", extra=0, labels=None):
-    width = max(map(len, sequences)) + extra
+def pack(sequences, pad_id, device, *, side="left", extra=0, labels=None, prompt_lengths=None):
+    if prompt_lengths is not None:
+        if len(prompt_lengths) != len(sequences) or any(not 0 < p <= len(s) for p, s in zip(prompt_lengths, sequences)):
+            raise ValueError('prompt_lengths must identify each nonempty prompt prefix')
+        prompt_width = max(prompt_lengths)
+        width = prompt_width + max(len(s) - p for p, s in zip(prompt_lengths, sequences))
+    else:
+        width = max(map(len, sequences)) + extra
     ids = torch.full((len(sequences), width), pad_id, dtype=torch.long, device=device)
     mask = torch.zeros_like(ids)
     oracle = torch.full_like(ids, -100) if labels is not None else None
     columns = []
     for row, sequence in enumerate(sequences):
         start = width - len(sequence) if side == "left" else 0
-        col = torch.arange(start, start + len(sequence), device=device)
+        if prompt_lengths is None:
+            col = torch.arange(start, start + len(sequence), device=device)
+        else:
+            prefix = prompt_lengths[row]
+            col = torch.cat((torch.arange(prompt_width - prefix, prompt_width, device=device),
+                             torch.arange(prompt_width, prompt_width + len(sequence) - prefix, device=device)))
         columns.append(col)
         ids[row, col] = torch.as_tensor(sequence, device=device)
         mask[row, col] = 1
@@ -30,7 +41,7 @@ def pack(sequences, pad_id, device, *, side="left", extra=0, labels=None):
 
 @torch.no_grad()
 def capture(model, sequences, pad_id=0, *, side="left", extra=0, labels=None,
-            topk=32, hidden_positions=12, chunk_size=256):
+            topk=32, hidden_positions=12, chunk_size=256, chunk_boundaries=None, prompt_lengths=None):
     """Return compact CPU traces plus transient full CPU logits for noise.
 
     The reference packs active tokens in row-major order before the decider
@@ -40,7 +51,7 @@ def capture(model, sequences, pad_id=0, *, side="left", extra=0, labels=None,
     """
     model.eval()
     inputs, columns = pack(sequences, pad_id, model.device, side=side,
-                           extra=extra, labels=labels)
+                           extra=extra, labels=labels, prompt_lengths=prompt_lengths)
     decider = model._active_iter_decider
     layers = list(getattr(decider, "hidden_states_layer_nums", []))
     if hasattr(decider, "hidden_states_layer_nums") and not layers:
@@ -98,6 +109,9 @@ def capture(model, sequences, pad_id=0, *, side="left", extra=0, labels=None,
 
     width = inputs["input_ids"].shape[1]
     chunk_size = chunk_size or width
+    boundaries = list(range(0, width, chunk_size)) + [width] if chunk_boundaries is None else list(chunk_boundaries)
+    if not boundaries or boundaries[0] != 0 or boundaries[-1] != width or any(b <= a for a, b in zip(boundaries, boundaries[1:])):
+        raise ValueError('chunk_boundaries must strictly increase from 0 to padded width')
     full_logits = [torch.empty(len(seq), model.config.vocab_size, dtype=model.dtype)
                    for seq in sequences]
     for trace in traces:
@@ -105,8 +119,7 @@ def capture(model, sequences, pad_id=0, *, side="left", extra=0, labels=None,
     cache = None
     hook = decider.register_forward_hook(observe, with_kwargs=True)
     try:
-        for start in range(0, width, chunk_size):
-            end = min(start + chunk_size, width)
+        for start, end in zip(boundaries, boundaries[1:]):
             active = [(row, position) for row, col in enumerate(columns)
                       for position, column in enumerate(col.tolist()) if start <= column < end]
             chunk = {"input_ids": inputs["input_ids"][:, start:end],

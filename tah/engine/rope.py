@@ -85,9 +85,9 @@ class RotaryEmbedding(nn.Module):
         self.max_seq_len_cached = config["max_position_embeddings"]
 
     @torch.no_grad()
-    def forward(self, x, positions):
+    def forward(self, x, positions, *, sequence_length=None):
         if self.kind in ("dynamic", "longrope"):
-            length = int(positions.max()) + 1
+            length = int(positions.max()) + 1 if sequence_length is None else sequence_length
             original = self.config["max_position_embeddings"]
             if self.kind == "dynamic":
                 if length > self.max_seq_len_cached:

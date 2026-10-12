@@ -41,11 +41,11 @@ class IterLabelDecider(nn.Module):
         self.max_iter = max_iter
         self.register_buffer("threshold", torch.tensor(0.5))
 
-    def forward(self, logits, depth, hidden=None, labels=None):
+    def forward(self, logits, depth, hidden=None, labels=None, *, hidden_indices=None):
         decision = torch.zeros(logits.shape[:-1], dtype=torch.bool, device=logits.device)
-        raw = torch.full_like(logits[..., 0], -10. if depth >= self.max_iter else 0.)
-        if depth < self.max_iter and labels is not None:
-            decision = (labels > depth) & (labels != -100)
+        raw = torch.where(torch.as_tensor(depth, device=logits.device) >= self.max_iter, -10., 0.).to(logits.dtype).expand_as(logits[..., 0])
+        if labels is not None:
+            decision = (labels > depth) & (labels != -100) & (depth < self.max_iter)
         return decision, raw, decision.to(logits.dtype)
 
 
@@ -71,12 +71,12 @@ class MLPIterDecider(nn.Module):
     def selected_layers(self, layer_count):
         return self.hidden_states_layer_nums or [layer_count]
 
-    def forward(self, logits, depth, hidden=None, labels=None):
-        if depth >= self.max_iter:
+    def forward(self, logits, depth, hidden=None, labels=None, *, hidden_indices=None):
+        if isinstance(depth, int) and depth >= self.max_iter:
             return (torch.zeros_like(logits[..., 0], dtype=torch.bool),
                     torch.full_like(logits[..., 0], -10.), torch.zeros_like(logits[..., 0]))
         indices = self.selected_layers(hidden.shape[-2] - 1)
-        features = hidden.index_select(-2, torch.tensor(indices, device=hidden.device)).flatten(-2)
+        features = hidden.index_select(-2, torch.tensor(indices, device=hidden.device) if hidden_indices is None else hidden_indices).flatten(-2)
         top = logits.topk(self.topk, dim=-1).values
         if self.normalize_input:
             features = self.layer_norm_hidden_states(features)
@@ -84,7 +84,12 @@ class MLPIterDecider(nn.Module):
         x = self.combined_projection(torch.cat((features, self.logits_projection(top)), dim=-1))
         raw = self.backbone(x).squeeze(-1)
         probability = raw.sigmoid()  # deliberately model dtype, including bf16 rounding
-        return probability > self.threshold, raw, probability
+        if isinstance(depth, int):
+            return probability > self.threshold, raw, probability
+        capped = depth >= self.max_iter
+        raw = torch.where(capped, -10., raw)
+        probability = torch.where(capped, 0., probability)
+        return (probability > self.threshold) & ~capped, raw, probability
 
 
 def build_decider(name, kwargs, max_iter):

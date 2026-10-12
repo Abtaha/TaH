@@ -12,12 +12,15 @@ from tah.model.utils import sample_next_token
 
 @pytest.fixture(autouse=True)
 def cpu_only(monkeypatch):
+    initialized_before = torch.cuda.is_initialized()
     torch.set_num_threads(4)
 
     def forbidden(*args, **kwargs):
         raise AssertionError("sampling CPU tests must not initialize CUDA")
 
     monkeypatch.setattr(torch.cuda, "_lazy_init", forbidden)
+    yield
+    assert torch.cuda.is_initialized() == initialized_before, "CPU test changed CUDA initialization state"
 
 
 def exact_target(logits, params):
@@ -333,7 +336,6 @@ def test_tiny_reference_constructor_logits():
     actual = sampler.probabilities(logits, sampler.make_batch(params))
     expected = torch.cat([exact_target(row[None], p) for row, p in zip(logits, params)])
     torch.testing.assert_close(actual, expected, atol=2e-7, rtol=2e-6)
-    assert not torch.cuda.is_initialized()
 
 
 def test_greedy_specialization_is_argmax_without_filter_or_rng(monkeypatch):

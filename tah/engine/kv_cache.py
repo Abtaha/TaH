@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 import math
 
 import torch
+from .tensors import upload
 
 
 class KVCapacityError(RuntimeError):
@@ -124,9 +125,9 @@ class SlotPool:
             pos[:table.size].copy_(table.positions[:table.size])
             table.slots, table.positions = slots, pos
         ids = list(reversed(self._free[-len(positions):]))
-        slot_ids = torch.tensor(ids, device=self.device, dtype=torch.int32)
+        slot_ids = upload(ids, self.device, torch.int32)
         table.slots[table.size:needed].copy_(slot_ids)
-        table.positions[table.size:needed].copy_(torch.tensor(positions, device=self.device))
+        table.positions[table.size:needed].copy_(upload(positions, self.device))
         del self._free[-len(positions):]
         for slot, position in zip(ids, positions):
             self._owners[slot] = (request.request_id, stream, position)

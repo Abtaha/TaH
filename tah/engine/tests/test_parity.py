@@ -87,3 +87,21 @@ def test_no_logit_epsilon_floor():
     altered["logit_abs_sum"] = .1
     with pytest.raises(AssertionError):
         assert_gtf([altered], noise)
+
+
+def test_generated_mlp_count_floor_preserves_structural_exactness():
+    from tah.engine.parity import derive_decision_limits
+    noise = dict(per_depth=[dict(depth=d, decision_compared=100, visited_mismatches=0,
+                                common_decision_mismatches=f) for d, f in [(1,0),(2,1),(3,0)]],
+                 reference_max_flip_margin=.02, pass_count_mismatches=1, top1_compared=100,
+                 mlp_count_floor=2, learned_depths=[1,2])
+    limits = derive_decision_limits(noise)
+    assert [d['flip_rate_limit'] for d in limits['per_depth']] == [.03,.03,0]
+    assert limits['pass_count_mismatch_rate_limit'] == .03
+    noise['learned_depths'] = []
+    noise['pass_count_mismatches'] = 0
+    for depth in noise['per_depth']:
+        depth['common_decision_mismatches'] = 0
+    limits = derive_decision_limits(noise)
+    assert all(d['flip_rate_limit'] == 0 for d in limits['per_depth'])
+    assert limits['pass_count_mismatch_rate_limit'] == 0

@@ -13,6 +13,7 @@ from tah.engine.rope import RotaryEmbedding
     {"rope_type": "longrope", "factor": 2., "short_factor": [1.] * 4, "long_factor": [2.] * 4},
 ])
 def test_scaled_rope_growth_and_reset_match_reference(scaling, monkeypatch):
+    initialized_before = torch.cuda.is_initialized()
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
     def forbidden(*args, **kwargs):
         raise AssertionError("RoPE development test must not initialize CUDA")
@@ -31,4 +32,4 @@ def test_scaled_rope_growth_and_reset_match_reference(scaling, monkeypatch):
         torch.testing.assert_close(engine.inv_freq, reference.inv_freq, rtol=0, atol=0)
         for left, right in zip(actual, expected):
             torch.testing.assert_close(left, right, rtol=0, atol=0)
-    assert not torch.cuda.is_initialized()
+    assert torch.cuda.is_initialized() == initialized_before

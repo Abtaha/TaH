@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import math
 
 import torch
+from .tensors import upload
 
 
 @dataclass(frozen=True)
@@ -93,7 +94,7 @@ class SamplingBatch:
             if name == "top_k":
                 # Greedy rows do not need a filter path and can share a bounded bucket.
                 values = [1 if p.greedy else p.top_k for p in params]
-            buffer.copy_(torch.tensor(values, dtype=buffer.dtype, device=buffer.device))
+            buffer.copy_(upload(values, buffer.device, buffer.dtype))
 
 
 @dataclass

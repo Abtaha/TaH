@@ -56,7 +56,7 @@ def forward_cached(model, embeddings, position_ids, depths, slots, pool, attenti
 
 @torch.inference_mode()
 def forward_chunk(model, input_ids, pool, request, *, start_position=0,
-                  iter_count_labels=None, hidden_positions=None, decode=False):
+                  iter_count_labels=None, hidden_positions=None, decode=False, workspace=None):
     """Bounded single-request teacher forcing with a persistent all-stream KV.
 
     start_position is an absolute RoPE/cache coordinate, increasing across chunks.
@@ -105,7 +105,7 @@ def forward_chunk(model, input_ids, pool, request, *, start_position=0,
             attention = DecodeBucket(pool, 1, request.size, model.config['num_attention_heads'])
             attention.prepare(rows)
         else:
-            attention = PrefillAttention(pool, rows, model.config['num_attention_heads'])
+            attention = PrefillAttention(pool, rows, model.config['num_attention_heads'], workspace=workspace)
         output = forward_cached(model, embeddings,
             torch.tensor(host_positions, device=model.device),
             torch.full((len(rows),), depth, device=model.device, dtype=torch.long),
