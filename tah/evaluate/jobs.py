@@ -55,6 +55,13 @@ _CODE_ANSWER_TYPES = frozenset({"humaneval", "mbpp"})
 _UNSUPPORTED_CODE_DATASETS = {"livecodebench": "LiveCodeBench has no grader in this repository."}
 
 
+def _write_run_status(directory: Path, status: dict) -> None:
+    """Keep machine-readable completion metadata next to combined artifacts."""
+    tmp = directory / "run_status.json.tmp"
+    tmp.write_text(json.dumps(status, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, directory / "run_status.json")
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # Per-problem prompt building + scoring
 # ────────────────────────────────────────────────────────────────────────────
@@ -464,7 +471,13 @@ def _run_job_process(job_args: Tuple, result_queue: Queue) -> None:
         )
         result_queue.put((job_id, True, "ok"))
     except Exception as e:
-        result_queue.put((job_id, False, f"Job {job_id} failed: {e}\n{traceback.format_exc()}"))
+        error = f"Job {job_id} failed: {e}\n{traceback.format_exc()}"
+        for ds_name in dataset_names:
+            directory = _dataset_run_dir(output_dir, ds_name, backend, timestamp,
+                                         dataset_ranges.get(ds_name))
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / f"job_{job_id}.error.txt").write_text(error, encoding="utf-8")
+        result_queue.put((job_id, False, error))
     finally:
         for k in ("MASTER_PORT", "MASTER_ADDR", "SGLANG_NCCL_PORT", "NCCL_SOCKET_IFNAME"):
             os.environ.pop(k, None)
@@ -670,11 +683,21 @@ def allocate_gpus_and_run_jobs(args) -> None:
         args.output_dir = Path(args.model_path) / "eval_results"
     args.output_dir = str(args.output_dir)
     dataset_run_dirs = {}
+    run_statuses = {}
     for ds_name in dataset_names:
         ds_run_dir = _dataset_run_dir(args.output_dir, ds_name, args.backend, timestamp, dataset_ranges.get(ds_name))
         ds_run_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(args.eval_config, ds_run_dir / Path(args.eval_config).name)
         dataset_run_dirs[ds_name] = ds_run_dir
+        run_statuses[ds_name] = {
+            "status": "running", "model_path": str(Path(args.model_path).resolve()),
+            "backend": args.backend, "dataset": ds_name, "timestamp": timestamp,
+            "expected_samples": sum(item["_source_dataset"] == ds_name for item in selected)
+                                * eval_config["repeat_size"],
+            "completed_samples": 0, "batch_size": eval_config["batch_size"],
+            "repeat_size": eval_config["repeat_size"], "random_seed": eval_config["_random_seed"],
+        }
+        _write_run_status(ds_run_dir, run_statuses[ds_name])
         if answer_types[ds_name] in _CODE_ANSWER_TYPES:
             code_file = ds_run_dir / "code_solutions.jsonl"
             code_file.write_text("", encoding="utf-8")
@@ -688,21 +711,47 @@ def allocate_gpus_and_run_jobs(args) -> None:
     print(f"\nPrepared {len(job_args_list)} jobs for execution")
 
     completed, failed = _run_jobs(job_args_list)
+    failed += max(0, len(job_args_list) - completed - failed)
     print(f"\nDone. ok={completed} failed={failed}")
     if failed > 0:
         print(f"WARNING: {failed} job(s) failed; results may be incomplete.")
 
     print("\nCombining results from all jobs...")
+    try:
+        for ds_name, ds_run_dir in dataset_run_dirs.items():
+            # Preserve worker artifacts until every worker and coverage check passes.
+            combine_job_results(ds_run_dir, args.job_nums, False)
+            with (ds_run_dir / "detailed_results.csv").open(newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+            actual = [(r["problem_id"], int(r["sample_idx"])) for r in rows]
+            expected = {(str(item["id"]), sample) for item in selected
+                        if item["_source_dataset"] == ds_name
+                        for sample in range(eval_config["repeat_size"])}
+            if len(actual) != len(set(actual)) or set(actual) != expected:
+                failed = max(1, failed)
+            run_statuses[ds_name]["completed_samples"] = len(rows)
+            if answer_types[ds_name] in _CODE_ANSWER_TYPES:
+                code_solutions_file = ds_run_dir / "code_solutions.jsonl"
+                if code_solutions_file.exists() and code_solutions_file.stat().st_size:
+                    from tah.evaluate.codeeval import evaluate as code_evaluate
+                    n_lines = sum(1 for _ in open(code_solutions_file, encoding="utf-8"))
+                    print(f"\nCode eval: {ds_name} on {n_lines} solutions ({code_solutions_file})")
+                    code_evaluate(dataset=ds_name, samples=str(code_solutions_file), allow_subset=True)
+                    print(f"Code eval results: {code_solutions_file.with_suffix('.eval_results.json')}")
+    except Exception:
+        for ds_name, ds_run_dir in dataset_run_dirs.items():
+            run_statuses[ds_name].update(status="failed", error=traceback.format_exc())
+            _write_run_status(ds_run_dir, run_statuses[ds_name])
+        raise
     for ds_name, ds_run_dir in dataset_run_dirs.items():
-        combine_job_results(ds_run_dir, args.job_nums, args.del_job_dir)
-        if answer_types[ds_name] in _CODE_ANSWER_TYPES:
-            code_solutions_file = ds_run_dir / "code_solutions.jsonl"
-            if code_solutions_file.exists() and code_solutions_file.stat().st_size:
-                from tah.evaluate.codeeval import evaluate as code_evaluate
-                n_lines = sum(1 for _ in open(code_solutions_file, encoding="utf-8"))
-                print(f"\nCode eval: {ds_name} on {n_lines} solutions ({code_solutions_file})")
-                code_evaluate(dataset=ds_name, samples=str(code_solutions_file), allow_subset=True)
-                print(f"Code eval results: {code_solutions_file.with_suffix('.eval_results.json')}")
+        run_statuses[ds_name].update(status="failed" if failed else "complete",
+                                   completed_jobs=completed, failed_jobs=failed)
+        _write_run_status(ds_run_dir, run_statuses[ds_name])
+        if not failed and args.del_job_dir:
+            for job_id in range(args.job_nums):
+                shutil.rmtree(ds_run_dir / f"job_{job_id}", ignore_errors=True)
+    if failed:
+        raise RuntimeError("Evaluation is incomplete; partial results, status, and worker errors were preserved.")
 
 
 # ────────────────────────────────────────────────────────────────────────────

@@ -303,6 +303,29 @@ before using partial output. The collector requires `--allow_incomplete` for
 known failed/running combined results. See [results](results.md) for schemas,
 code grading, and diagnostic collection.
 
+## Long runs and terminal reconnections
+
+Start long jobs in a **detached** tmux session, and monitor it through a read-only
+client. Detaching protects a job from a disconnected terminal; a normal attached
+client can still send Ctrl-C or shell-activation commands into the running job.
+
+For example, with the smoke config prepared above, these commands start a
+separate evaluation and attach without allowing keyboard input to the job:
+
+```bash
+mkdir -p data/eval_smoke_detached
+tmux new-session -d -s tah-eval -c "$PWD" \
+  "bash -c 'set -o pipefail; CUDA_VISIBLE_DEVICES=0 .venv-tah/bin/python script/tah/evaluation/eval.py --eval_config /tmp/tah_eval_smoke.yaml --model_path nics-efc/TaH-plus-1.7B --dataset_name gsm8k --backend tah --job_nums 1 --tp_size_per_job 1 --data_range 5 --output_dir data/eval_smoke_detached 2>&1 | tee data/eval_smoke_detached/console.log'"
+tmux attach-session -r -t tah-eval
+```
+
+Use `tmux capture-pane -p -S -30 -t tah-eval` for a noninteractive progress
+snapshot. The session can disappear after the command finishes; inspect the
+saved log and `run_status.json` to distinguish completion from interruption.
+Before restarting an interrupted run, count persisted CSV/raw-output pairs,
+preserve them, and select only missing IDs into a new output root. The original
+command starts all its selected problems again; it does not resume a worker CSV.
+
 Source of truth: [CLI](../script/tah/evaluation/eval.py),
 [job runner](../tah/evaluate/jobs.py), [backends](../tah/evaluate/backends.py),
 [config loading](../tah/model/tah_model.py),

@@ -15,6 +15,7 @@ _FIELDS = (
     "model", "run", "dataset", "backend", "metric", "accuracy_or_pass_at_1",
     "correct_count", "total_samples", "problem_count", "avg_output_length",
     "mean_passes_per_token", "fraction_tokens_at_least_2_passes",
+    "run_status", "expected_samples",
 )
 
 
@@ -68,13 +69,18 @@ def _code_metrics(run_dir: Path) -> Optional[Dict[str, object]]:
     }
 
 
-def collect_results(results_dir: str | Path, output_file: Optional[str | Path] = None) -> List[dict]:
+def collect_results(
+    results_dir: str | Path,
+    output_file: Optional[str | Path] = None,
+    model_name: Optional[str] = None,
+    allow_incomplete: bool = False,
+) -> List[dict]:
     """Find all evaluation stats below one model's results root and write a CSV."""
     root = Path(results_dir).expanduser().resolve()
     if not root.is_dir():
         raise FileNotFoundError(f"results directory does not exist: {root}")
     output = Path(output_file).expanduser().resolve() if output_file else root / "results_summary.csv"
-    model = root.parent.name or root.name
+    model = model_name or root.parent.name or root.name
     rows: List[dict] = []
     for stats_file in sorted(root.rglob("evaluation_stats.csv")):
         relative = stats_file.relative_to(root)
@@ -85,6 +91,11 @@ def collect_results(results_dir: str | Path, output_file: Optional[str | Path] =
             continue
         dataset, backend = _parse_dataset_backend(parts[0])
         run_dir = stats_file.parent
+        status_file = run_dir / "run_status.json"
+        status = json.loads(status_file.read_text()) if status_file.exists() else {}
+        run_status = status.get("status", "legacy_unverified")
+        if run_status != "complete" and status and not allow_incomplete:
+            raise ValueError(f"Run is {run_status}: {run_dir}. Use --allow_incomplete for a diagnostic summary.")
         run_parts = list(parts[1:-1])
         timestamp_idx = next((i for i, part in enumerate(run_parts) if _TIMESTAMP.match(part)), None)
         run_id = "/".join(run_parts[timestamp_idx:]) if timestamp_idx is not None else "/".join(run_parts)
@@ -103,7 +114,11 @@ def collect_results(results_dir: str | Path, output_file: Optional[str | Path] =
             total_samples = stats["total_samples"]
             # Per-problem rows are the non-empty rows before the totals section.
             problem_count = sum(1 for row in _read_stats_rows(stats_file) if row.get("problem_id") not in (None, "", "Total Accuracy"))
+        if run_status == "complete" and int(total_samples) != int(status["expected_samples"]):
+            raise ValueError(f"Completed status disagrees with sample totals: {run_dir}")
         rows.append({
+            "run_status": run_status,
+            "expected_samples": status.get("expected_samples", ""),
             "model": model,
             "run": run_id,
             "dataset": dataset,
@@ -132,10 +147,13 @@ def _read_stats_rows(path: Path) -> List[dict]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Collect TaH evaluation results across datasets and runs")
-    parser.add_argument("--results_dir", required=True, help="Model eval_results directory")
+    parser.add_argument("--results_dir", required=True, help="Root directory containing evaluation output folders")
     parser.add_argument("--output_csv", default=None, help="Output CSV (default: <results_dir>/results_summary.csv)")
+    parser.add_argument("--model_name", default=None, help="Model label (defaults to the parent directory name)")
+    parser.add_argument("--allow_incomplete", action="store_true",
+                        help="Include failed/running runs in a diagnostic summary")
     args = parser.parse_args()
-    rows = collect_results(args.results_dir, args.output_csv)
+    rows = collect_results(args.results_dir, args.output_csv, args.model_name, args.allow_incomplete)
     print(f"Wrote {len(rows)} run/dataset rows to {args.output_csv or Path(args.results_dir) / 'results_summary.csv'}")
 
 
