@@ -20,27 +20,44 @@ def cpu_only(monkeypatch):
     monkeypatch.setattr(torch.cuda, "_lazy_init", forbidden)
 
 
-def exact_target(logits, params, *, stable=False):
-    """Independent transcription of the reference; retain its filter order."""
+def exact_target(logits, params):
+    """Independent target with score then token-ID ordering for cutoff ties."""
     if params.greedy:
         return torch.zeros_like(logits.float()).scatter(-1, logits.argmax(-1, keepdim=True), 1)
     p = torch.softmax(logits.float() / params.temperature, -1)
     if params.min_p > 0:
         p[p < params.min_p * p.max(-1, keepdim=True).values] = 0
         p /= p.sum(-1, keepdim=True)
+    # Deterministically order equal raw scores by token index, then keep the
+    # same prefix for top-k and stable nucleus ties.
+    raw_order = torch.argsort(logits.float(), dim=-1, descending=True, stable=True)
+    p = p.gather(-1, raw_order)
+    p, prob_order = torch.sort(p, dim=-1, descending=True, stable=True)
+    token_order = raw_order.gather(-1, prob_order)
     if params.top_k > 0:
-        threshold = p.topk(min(params.top_k, p.shape[-1]), dim=-1).values[:, -1:]
-        p[p < threshold] = 0
+        positions = torch.arange(p.shape[-1], device=p.device)[None, :]
+        p = torch.where(positions < min(params.top_k, p.shape[-1]), p, 0)
         p /= p.sum(-1, keepdim=True)
     if params.top_p < 1:
-        ranked, order = torch.sort(p, descending=True, dim=-1, stable=stable)
-        remove = ranked.cumsum(-1) > params.top_p
+        remove = p.double().cumsum(-1) > params.top_p
         remove[:, 1:] = remove[:, :-1].clone()
         remove[:, 0] = False
-        remove = torch.zeros_like(remove).scatter(-1, order, remove)
         p[remove] = 0
         p /= p.sum(-1, keepdim=True)
-    return p
+    return torch.zeros_like(p).scatter(-1, token_order, p)
+
+
+def exact_uniform_top_p_target(vocab, k, top_p, *, device="cpu"):
+    """FP64 nucleus oracle for a uniform top-k tie under the documented rule."""
+    top_p = float(torch.tensor(top_p, dtype=torch.float32))
+    ranked = torch.full((1, k), 1.0 / k, dtype=torch.float64, device=device)
+    remove = ranked.cumsum(-1) > top_p
+    remove[:, 1:] = remove[:, :-1].clone()
+    remove[:, 0] = False
+    ranked[remove] = 0
+    ranked /= ranked.sum(-1, keepdim=True)
+    return torch.zeros((1, vocab), dtype=torch.float32, device=device).scatter(
+        -1, torch.arange(k, device=device)[None, :], ranked.float())
 
 
 CASES = [
@@ -68,8 +85,9 @@ CASES = [
 ]
 
 
-@pytest.mark.parametrize("values,params", CASES)
-def test_target_and_reference_filter_order(values, params):
+@pytest.mark.parametrize("case_index", range(len(CASES)))
+def test_target_and_reference_filter_order(case_index):
+    values, params = CASES[case_index]
     logits = torch.tensor([values])
     sampler = GraphSampler(logits.shape[-1])
     batch = sampler.make_batch([params])
@@ -77,7 +95,9 @@ def test_target_and_reference_filter_order(values, params):
     torch.testing.assert_close(sampler.probabilities(logits, batch), expected, atol=0, rtol=0)
     if params.greedy:
         assert torch.equal(sample_next_token(logits, do_sample=False), expected.argmax(-1))
-    else:
+    elif case_index not in {12, 13, 14}:
+        # The unchanged reference keeps every probability tie at top-k. The
+        # simplified engine uses its documented exact-k tie rule instead.
         seen = []
 
         def intercept(p, num_samples):
@@ -99,7 +119,7 @@ def test_sampling_statistics():
         logits = torch.tensor([values]).expand(draws, -1)
         sampler = GraphSampler(len(values))
         batch = sampler.make_batch([params] * draws)
-        # Independent per-request seeds; sequential-stream determinism tested below.
+        # Independent per-request seeds; also exercise a consecutive counter stream.
         rng = RequestRNG.from_seeds(list(range(draws)))
         stream = "independent request seeds"
         if i % 2:
@@ -210,9 +230,18 @@ def test_bounded_algorithm_against_stable_full_target(k):
               for i in range(16)]
     sampler = GraphSampler(8193, max_top_k=k)
     batch = sampler.make_batch(params)
-    actual = sampler._bounded_probabilities(sampler._min_p(logits, batch), batch)
-    expected = torch.cat([exact_target(row[None], p, stable=True)
-                          for row, p in zip(logits, params)])
+    ids, probs = sampler._bounded_distribution(logits, batch)
+    actual = torch.zeros_like(logits).scatter(-1, ids, probs.float())
+    targets = []
+    for row, p in zip(logits, params):
+        if p.min_p == 1 and torch.equal(row, row[:1].expand_as(row)):
+            # For an exact tied nucleus boundary, use the documented stable
+            # score/token rule in FP64 instead of inheriting CPU FP32 drift.
+            targets.append(exact_uniform_top_p_target(
+                logits.shape[-1], min(p.top_k, logits.shape[-1]), p.top_p))
+        else:
+            targets.append(exact_target(row[None], p))
+    expected = torch.cat(targets)
     assert torch.equal(actual > 0, expected > 0)
     torch.testing.assert_close(actual, expected, atol=2e-7, rtol=2e-6)
 
@@ -223,10 +252,12 @@ def test_bounded_nucleus_at_exact_cdf_boundary():
     params = [SamplingParams(top_k=20, top_p=p) for p in pvals]
     sampler = GraphSampler(8193, max_top_k=20)
     batch = sampler.make_batch(params)
-    actual = sampler._bounded_probabilities(sampler._min_p(logits, batch), batch)
-    expected = torch.cat([exact_target(row[None], p, stable=True)
-                          for row, p in zip(logits, params)])
-    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    ids, probs = sampler._bounded_distribution(logits, batch)
+    actual = torch.zeros_like(logits).scatter(-1, ids, probs.float())
+    expected = torch.cat([exact_uniform_top_p_target(logits.shape[-1], 20, p.top_p)
+                          for p in params])
+    assert torch.equal(actual > 0, expected > 0)
+    torch.testing.assert_close(actual, expected, atol=2e-7, rtol=2e-6)
 
 
 def test_static_shapes_and_no_host_scalar_operations(monkeypatch):
@@ -246,8 +277,8 @@ def test_static_shapes_and_no_host_scalar_operations(monkeypatch):
     first = sampler.sample(logits, batch, rng)
     assert first.shape == (2,) and first.dtype == torch.int64
     assert sampler.probabilities(logits, batch).shape == (2, 97)
-    bounded = sampler._bounded_probabilities(sampler._min_p(logits, batch), batch)
-    assert bounded.shape == (2, 97)
+    bounded_ids, bounded_probs = sampler._bounded_distribution(logits, batch)
+    assert bounded_ids.shape == bounded_probs.shape == (2, 20)
 
 
 @pytest.mark.parametrize("kwargs", [dict(temperature=-1), dict(temperature=float("nan")),
@@ -273,6 +304,18 @@ def test_admission_updates_keep_addresses_and_validate_bounds():
         batch.update([SamplingParams(top_k=2)])
     with pytest.raises(ValueError, match="seeds"):
         RequestRNG.from_seeds([1 << 63])
+
+
+def test_general_fallback_bucket_accepts_topk_zero_and_above_bound():
+    sampler = GraphSampler(97, max_top_k=20)
+    params = [SamplingParams(top_k=0), SamplingParams(top_k=21)]
+    batch = sampler.make_batch(params)
+    assert not batch.bounded
+    logits = torch.randn(2, 97, generator=torch.Generator().manual_seed(12))
+    torch.testing.assert_close(
+        sampler.probabilities(logits, batch),
+        torch.cat([exact_target(row[None], p) for row, p in zip(logits, params)]),
+        atol=2e-7, rtol=2e-6)
 
 
 def test_tiny_reference_constructor_logits():

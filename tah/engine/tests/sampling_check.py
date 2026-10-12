@@ -1,7 +1,7 @@
 """WP5 reproducible sampler microbench (not an end-to-end W-perf gate).
 
-CPU timings distinguish production full-sampler code from the forced stable
-bounded filtering math. CUDA measures full/fast/greedy samplers in eager and
+CPU timings distinguish production full-sampler code from the forced bounded
+shortlist math. CUDA measures full/fast/greedy samplers in eager and
 captured replay, plus the fp32 reference. No production parity fixtures needed.
 """
 from __future__ import annotations
@@ -53,8 +53,8 @@ def run(args):
                 fn = lambda: sample_next_token(logits.float(), temperature=.6, top_k=20, top_p=.95)
                 measured = "fp32 reference sample_next_token"
             elif mode == "bounded" and args.device == "cpu":
-                fn = lambda: sampler._bounded_probabilities(sampler._min_p(logits, batch), batch)
-                measured = "stable bounded filtering math only (forced CPU; excludes RNG/selection)"
+                fn = lambda: sampler._bounded_distribution(logits, batch)
+                measured = "bounded shortlist path math (forced CPU; excludes RNG)"
             else:
                 fn = lambda: sampler.sample(logits, batch, rng)
                 measured = "complete sampler"

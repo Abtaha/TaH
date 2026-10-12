@@ -7,7 +7,9 @@ import pytest
 import torch
 
 from tah.engine.sampling import GraphSampler, RequestRNG, SamplingParams, request_uniform
-from tah.engine.tests.test_sampling import CASES, exact_target, splitmix_python
+from tah.engine.tests.test_sampling import (CASES, exact_target,
+                                            exact_uniform_top_p_target,
+                                            splitmix_python)
 
 pytestmark = pytest.mark.gpu
 
@@ -55,7 +57,8 @@ def test_gpu_nucleus_boundary_and_rng_integer_oracle():
     logits = torch.zeros(len(ps), v, device="cuda")
     sampler = GraphSampler(v, max_top_k=20)
     actual = sampler.probabilities(logits, sampler.make_batch(ps, device="cuda"))
-    expected = torch.cat([exact_target(row[None], p) for row, p in zip(logits, ps)])
+    expected = torch.cat([exact_uniform_top_p_target(v, 20, p.top_p, device="cuda")
+                          for p in ps])
     assert torch.equal(actual > 0, expected > 0)
     torch.testing.assert_close(actual, expected, atol=2e-7, rtol=2e-6)
     seeds = [0, 1, -1, (1 << 63) - 1, -(1 << 63), 81923]
@@ -65,6 +68,24 @@ def test_gpu_nucleus_boundary_and_rng_integer_oracle():
     expected_u = torch.tensor([splitmix_python(s, c) for s, c in zip(seeds, counters)],
                               dtype=torch.float64)
     assert torch.equal(request_uniform(rng).cpu(), expected_u)
+
+
+def test_gpu_tied_shortlist_repeatability_across_k_buckets():
+    v, top_k = 8193, 8
+    logits = torch.zeros(1, v, device="cuda", dtype=torch.bfloat16)
+    targets = []
+    for bound in (8, 20, 32):
+        sampler = GraphSampler(v, max_top_k=bound)
+        batch = sampler.make_batch([SamplingParams(top_k=top_k)], device="cuda")
+        first_ids, first_probs = sampler._bounded_distribution(logits, batch)
+        again_ids, again_probs = sampler._bounded_distribution(logits, batch)
+        assert torch.equal(first_ids, again_ids)
+        assert torch.equal(first_probs, again_probs)
+        target = sampler.probabilities(logits, batch)
+        assert torch.equal(
+            (target[0] > 0).nonzero().flatten(), torch.arange(top_k, device="cuda"))
+        targets.append(target)
+    assert all(torch.equal(targets[0], target) for target in targets[1:])
 
 
 @pytest.mark.parametrize("bound,greedy,v", [(None, False, 97), (None, False, 8193),
@@ -150,4 +171,11 @@ def test_gpu_statistical_distributions_graph_replay():
                         "total_variation": float((observed - expected).abs().sum() / 2)})
     root = Path("data/engine/wp5")
     root.mkdir(parents=True, exist_ok=True)
-    (root / "gpu-statistics.json").write_text(json.dumps(results, indent=2) + "\n")
+    report = {
+        "device": torch.cuda.get_device_name(),
+        "workload": "synthetic sampler distributions; development diagnostic only",
+        "draws_per_case": draws,
+        "production_gates_eligible": False,
+        "results": results,
+    }
+    (root / "gpu-statistics.json").write_text(json.dumps(report, indent=2) + "\n")

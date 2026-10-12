@@ -409,3 +409,38 @@ Compilation builds both kernels offline for sm80/sm86/sm89 using the installed
 Triton/toolchain and never loads a CUDA module. Reports include
 `production_gates_eligible=false`; CPU correctness and timing do not establish
 production model parity, GPU performance or portability.
+
+## Graph-safe sampling
+
+`GraphSampler` implements per-row temperature, min-p, top-k, top-p and greedy
+sampling with `RequestRNG` state. A bounded sampler such as
+`GraphSampler(vocab_size, max_top_k=20)` selects one top-20 shortlist for each
+large-vocabulary CUDA row, then applies the filters on those 20 candidates.
+Sampled rows in that bucket must have `1 <= top_k <= 20`; `top_k=0` or a larger
+value uses the general full-vocabulary path. Keep these as separate fixed-shape
+buckets. Within the selected shortlist, equal scores use token-ID-ascending
+ordering. At the outer CUDA top-K boundary, tied membership follows the pinned
+PyTorch 2.6 kernel for that shape and dtype; rerun the tie tests when changing
+the execution environment. Bounded top-p uses FP64 shortlist arithmetic. A
+`top_p` chosen exactly from a full-vocabulary FP32 reference CDF can select an
+adjacent nucleus because the reference rounds its full-vocabulary reductions;
+strict parity for those deliberately rounded cutoffs is still open.
+`temperature=0` is greedy.
+
+Create parameter and request state before graph capture. When requests move,
+move their sampling parameters, seed and counter with them; inactive rows return
+`-1` and do not advance their counter. Update parameter values in place so the
+captured tensor addresses stay fixed:
+
+```python
+from tah.engine.sampling import GraphSampler, RequestRNG, SamplingParams
+
+sampler = GraphSampler(vocab_size, max_top_k=20)
+batch = sampler.make_batch(per_request_params, device="cuda")
+rng = RequestRNG.from_seeds(per_request_seeds, device="cuda")
+# Capture sampler.sample(final_logits, batch, rng, active) with fixed buffers.
+```
+
+Use `GraphSampler(vocab_size, greedy_only=True)` for a separately captured
+all-greedy bucket. Sampling does not create a `generate` API; the engine caller
+owns request lifecycle and carries RNG state through scheduling and swaps.
