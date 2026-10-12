@@ -58,6 +58,8 @@ Think-at-Hard (TaH) improves LLM reasoning by running extra latent iterations on
 
 TaH and TaH2 require different dependency versions. Activate their separate environments before running the corresponding scripts.
 
+See the [user guide](guide/README.md) for repository layout, installation, TaH evaluation, results, and engine status.
+
 ## TaH2 Usage
 
 This repository includes training recipes, evaluation tools, and an inference engine adapted from [mini-SGLang](https://github.com/sgl-project/mini-sglang), integrated under `tah2/minisgl/`.
