@@ -63,6 +63,8 @@ regardless. Combined `samples.jsonl` preserves raw outputs after successful
 worker cleanup. Console logs need shell redirection. Engine token IDs and per-token counts are
 saved in raw JSON; inference timing and GPU peaks are saved in job metrics.
 Reference/HF/SGLang token IDs and full pass arrays are not exported.
+Engine restart counters are in `engine_run` and raw sample `timing`; wasted
+output is excluded from final token IDs, counts and grading.
 
 ## Every detailed CSV column
 
@@ -101,7 +103,8 @@ sum is not a total elapsed scope when grading runs in parallel.
 
 Engine metrics also include `engine_options` (effective resident cap),
 `memory_budget` (startup KV reservations and both graph capture rounds),
-`engine_run` (generation wall/steps/swaps/host-swap peak), `callback_seconds`,
+`engine_run` (generation wall/steps/swaps/host-swap peak, `restarts`,
+`wasted_tokens`, `blocked_restart_admission_steps`, `free_rows`), `callback_seconds`,
 `generation_seconds`, and `peak_gpu_allocated_bytes`/`peak_gpu_reserved_bytes`.
 `generation_seconds` is engine wall time minus synchronous callback time;
 use exact `engine_run.generated_tokens / generation_seconds` for throughput

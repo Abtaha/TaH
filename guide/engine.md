@@ -27,6 +27,10 @@ and ±10% mean-pass limits: Math500 `[0,200)` scores 66.50% versus reference
 70.75%, and GPQA Diamond scores 34.60% versus 36.36%, both with repeat 2.
 Mean passes/token are 1.070168 and 1.197301. Observed accuracies differ;
 these results pass the statistical limits, rather than establishing exact equality.
+A second seed, split into two multi-dataset runs, scores 69.50% on Math500
+and 30.56% on GPQA, with mean passes 1.072069 and 1.195237. Both pass the same
+limits; GPQA remains 5.81 percentage points below reference, so the limited
+statistical power remains a caveat for accuracy comparisons.
 
 Use [installation](installation.md) for the `engine` extra and prerequisites,
 and [evaluation](evaluation.md) for engine and reference benchmarks. TaH2's bundled
@@ -85,7 +89,9 @@ final logits sampled that output token. EOS and its count are excluded, exactly
 as in reference generation; the EOS ID comes from the tokenizer, rather than
 an expanded generation-config stop list. `max_new_tokens=0` still computes
 prompt counts and returns an empty output. Timing contains `total_seconds`
-(including queue time), `queue_seconds`, `prefill_seconds`, and `swaps`.
+(including queue time), `queue_seconds`, `prefill_seconds` (all attempts), `swaps`, `restarts`, and `wasted_tokens`
+(discarded generated tokens). Initial queue time is measured to first admission;
+total latency includes restarts.
 
 Constructor options (keyword-only):
 
@@ -97,7 +103,7 @@ Constructor options (keyword-only):
 | `memory_fraction` | .9 | Fraction of measured free GPU memory after loading weights available for KV and workspace reservations. |
 | `kv_capacity` | `None` | Auto-size page-size-one KV entries across all passes; an explicit larger-than-safe capacity is rejected. |
 | `admission_headroom` | .1 | Fraction of KV slots that must remain free after worst-case prefill, in addition to running-row growth. |
-| `host_swap_bytes` | 8 GiB | Live pinned-host swap payload/ledger budget; exceeding it raises `KVCapacityError`. |
+| `host_swap_bytes` | 8 GiB | Live pinned-host swap payload/ledger budget; overflow restarts the newest active request from its prompt. Zero disables host swaps and uses restart on pressure. |
 | `swap_chunk_entries` | 256 | Maximum KV entries in shared device swap scratch; swaps never gather a whole request on device. |
 | `max_new_tokens` | 1024 | Generation cap for plain string/token-list requests. |
 | `seed` | 0 | Base seed for plain requests; each input adds its index. |
@@ -169,15 +175,35 @@ every running row before execution. If growth runs out of slots, the newest
 resident request swaps its KV, cumulative logits, next input embedding and RNG
 state to pinned host memory. Its host scheduler state is frozen. Restoration is
 FIFO by preemption time; new admission is blocked while any request is swapped.
-There is no recompute path. Requests exceeding the model context, the worst-case
-prefill capacity/headroom, or the actual single-request growth capacity fail
-clearly. Slot and swap ownership are released on success and on exceptions.
+If a swap would exceed the host budget, the newest active request (resident
+or swapped) discards its KV, logits, embedding, draw counter and unfinished
+output, then restarts from its original prompt and seed. Its index is unchanged;
+only the final successful attempt emits a callback. Swapping is the primary
+mechanism and preserves exact state. Restart changes the execution composition,
+so its final output is a valid sample but can differ from an unrestarted run.
+Dropping a swapped victim waits for any pending outgoing copy before releasing
+the snapshot and reusing its host budget; this cleanup is outside graph decode.
+
+The retry queue is ordered by original request index. Swapped requests restore
+FIFO before retries; retries take priority over fresh inputs. Fresh admission
+stays blocked while any retry waits. Pressure removes newer attempts while older
+resident requests advance, so repeatedly admitting retries cannot stop progress.
+Requests exceeding model context, worst-case prefill capacity/headroom, or actual
+single-request growth capacity still fail clearly. KV, row and host snapshot
+ownership are released on success and on exceptions.
 
 `engine.last_run` reports wall seconds (excluding engine construction), generated
 tokens, tokens/s, decode steps, swap counts, blocked-admission steps, peak live
-host swap bytes, `graph_steps`/`eager_steps`, and optional per-step timing samples.
+host swap bytes, `graph_steps`/`eager_steps`, `restarts`, `wasted_tokens`,
+`blocked_restart_admission_steps`, and optional per-step timing samples.
+`wasted_tokens` counts sampled output tokens discarded across failed attempts;
+completed output lengths and pass arrays include only the final attempt.
+`free_rows` equals the resident cap after a successful run. Restarts are logged
+at warning level with request index, original seed, discarded count and whether
+the victim was resident or swapped. The eval harness saves these fields inside
+`job_<id>.metrics.json.engine_run` and per-request counts inside raw JSON `timing`.
 `time_seconds` and `time_share` divide generation wall time into decode, prefill,
-swap issue work and remaining host scheduling/callback work. Swap transfers are
+swap issue work, restart cleanup and remaining host scheduling/callback work. Swap transfers are
 asynchronous; their completion can contribute to the following decode/prefill
 scope. These are wall scopes, not additive GPU utilization. Each CUDA decode step
 uses one status transfer to the host. Exact batch-size buckets keep fixed buffer
@@ -222,34 +248,51 @@ An engine environment-check failure points to `--backend tah`.
 
 ## Long generations and host memory
 
-On roughly 30 GB RAM machines (the 3090 host and L40S VM), keep the live host
-swap budget at 8 GiB and reduce resident requests for long generation. This
-budget is pinned host RAM for KV/state; it does not configure the operating
-system's disk swap. For the
-1.7B checkpoint with prompts up to 3k tokens and a 16,384-token generation cap,
-use `max_batch_size: 4`, `memory_fraction: 0.9`, `host_swap_bytes: 8589934592`,
-`prefill_chunk_size: 128`, CUDA graphs enabled, and compile disabled. For
-prompts near 16k with another 16k generated tokens, use resident cap 2.
-These are conservative sizing recommendations; arbitrary prompt/pass mixes
-can require a smaller cap based on the startup `memory_budget.kv_capacity`.
+On roughly 30 GB RAM machines (the 3090 host and L40S VM), use the usual
+resident cap 64, memory fraction .9, prefill chunk 128, host swap 8 GiB, CUDA
+graphs on and compile off, including `max_new_tokens: 16384`. Small resident
+caps are no longer required to avoid a host-budget abort: overflow restarts
+requests automatically. The budget is pinned host RAM for KV/state, separate
+from the operating system's disk swap. Keep it bounded instead of increasing
+it to cover every possible output mix.
 
-Each KV entry is 112 KiB for the 28-layer 1.7B checkpoint. A worst-case two-pass
-request with a 3k prompt and 16k generation needs about 38k entries (~4.1 GiB).
-Four such requests need about 153k entries; the small-cap auto-sized pool plus
-8 GiB host swap offers room for that bound on an otherwise idle 24 GB GPU.
-Choose a cap so worst-case total entries minus GPU capacity stays below the
-host budget, leaving room for per-request state, prompt tables, graders, weights
-and OS RAM. Requests must also fit the model context and fit the GPU pool alone.
-Lowering `memory_fraction` shrinks the GPU pool and can **increase** host swap.
-Increasing the swap budget on a RAM-limited host is not the first remedy.
+Each KV entry is 112 KiB for the 28-layer 1.7B checkpoint. Prompt and generated
+passes share the GPU pool; many long outputs can require more than GPU plus
+host capacity. Restart discards unfinished output and regenerates it from the
+prompt with the same seed. `restarts`, `wasted_tokens` and warning logs show the
+extra work; high restart counts can reduce throughput. A smaller resident cap
+or a larger host budget when RAM permits can reduce that cost, but is optional.
+Lowering memory fraction shrinks the GPU pool and can increase memory pressure.
+Requests must still fit model context and fit the GPU pool individually.
 
-The B64 16k stress completed with 6.36 GiB live host swap of the 8 GiB budget;
-that observed mix is close to the budget and does not bound arbitrary outputs.
-Budget exhaustion raises an explicit error and preserves incremental outputs.
-The default 4 grading processes consume host RAM too; use `--grading-workers 2`
-if RAM is constrained. Monitor available RAM as well as GPU memory. Use these
-settings on the L40S VM after its environment/smoke checks; L40S portability
-and performance have not been measured locally.
+The earlier B64 16k stress used 6.36 GiB of the 8 GiB live swap budget, and
+4096-token accuracy evaluation used 6.42 GiB. These observed mixes do not bound
+arbitrary outputs. The overflow fallback handles larger aggregate demand.
+Grading processes need host RAM and their own CPU cores too; on small VMs use
+`--grading-workers 0`. L40S portability and performance remain user checks.
+
+## CPU cores and affinity
+
+Measured W-smoke with B16 and `taskset` on the 3090: graph mode sustains about
+793 generated tokens/s on 1, 2, 4 or 16 CPU cores. Eager mode measures 121 tokens/s
+on one core and 379–381 on at least two. One CPU core is sufficient for graph
+mode; allocate at least two for eager/debug runs. These are measured generation
+figures; grading processes require additional cores and RAM. On a small VM,
+keep graphs enabled and use `--grading-workers 0` to grade inline.
+
+`taskset` selects Linux CPU IDs from the process's allowed affinity list. This
+example chooses one available core for graph evaluation; use the first two
+allowed IDs and `--engine-options '{"cuda_graphs": false}'` for eager debugging:
+
+```bash
+source .venv-tah/bin/activate
+cpu_id=$(python -c 'import os; print(min(os.sched_getaffinity(0)))')
+CUDA_VISIBLE_DEVICES=0 taskset -c "$cpu_id" python script/tah/evaluation/eval.py \
+  --eval_config script/tah/recipes/qwen3_1.7/eval_tah.yaml \
+  --model_path models/TaH-plus-1.7B --dataset_name math500 --data_range 0 16 \
+  --backend tah_engine --max-new-tokens 1024 --grading-workers 0 \
+  --engine-max-batch-size 16 --output_dir data/eval_one_core
+```
 
 ## Engine validation and performance tools
 

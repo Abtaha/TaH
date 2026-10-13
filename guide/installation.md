@@ -141,6 +141,14 @@ decode for both Qwen3 model labels, and arbitrary-mask prefill (q=4, kv=7).
 It benchmarks with 20 warmups and 100 measured iterations, writes no result
 files, and raises on a numerical mismatch or absent CUDA.
 
+## CPU sizing
+
+With W-smoke B16 and `taskset`, the RTX 3090 graph engine measured about
+793 tokens/s on 1, 2, 4 or 16 CPU cores. Eager mode measured 121 on one core
+versus 379–381 on at least two. Graph mode needs one core; eager/debug needs at
+least two. Grading processes need their own cores and host RAM. On small VMs
+use `--grading-workers 0`. See [CPU affinity examples](engine.md#cpu-cores-and-affinity).
+
 ## Troubleshooting
 
 | Symptom | Action |

@@ -295,8 +295,8 @@ fallback. `engine.seed` defaults to `--random_seed` and sets the base of the
 engine's per-request seed sequence. Use one GPU and `--job_nums 1` on a 3090.
 
 CLI `--engine-options` merges over YAML, then the three explicit engine flags
-win over both. For example, a conservative 16k generation run on a machine with
-about 30 GB RAM and prompts up to 3k tokens:
+win over both. For example, a 16k generation run with the usual resident cap
+on a machine with about 30 GB RAM:
 
 ```bash
 source .venv-tah/bin/activate
@@ -305,12 +305,24 @@ CUDA_VISIBLE_DEVICES=0 python script/tah/evaluation/eval.py \
   --model_path models/TaH-plus-1.7B --dataset_name math500,gpqa \
   --backend tah_engine --job_nums 1 --tp_size_per_job 1 \
   --max-new-tokens 16384 \
-  --engine-max-batch-size 4 --engine-host-swap-gib 8 \
+  --engine-max-batch-size 64 --engine-host-swap-gib 8 \
   --engine-memory-fraction .9 --output_dir data/eval_long
 ```
 
 See [long-context sizing](engine.md#long-generations-and-host-memory)
 for prompt bounds and settings. Defaults are CUDA graphs enabled and compile off.
+When a host snapshot would exceed the swap budget, the newest active request
+restarts from its original prompt and seed instead of aborting the run. It keeps
+its sample index and emits one final result; its discarded attempt is counted
+in `engine_run.restarts`/`wasted_tokens` and per-sample raw JSON `timing`. FIFO
+swap restore still comes first, retries precede fresh requests, and fresh
+admission stays blocked while a retry waits. Long generation can keep cap 64;
+smaller caps are an optional way to reduce wasted work. Individual requests
+must still fit model context and the GPU pool.
+
+For small VMs, graph generation needs one CPU core; eager/debug needs at least
+two. Allocate separate cores for grading processes or use `--grading-workers 0`.
+See [CPU affinity measurements](engine.md#cpu-cores-and-affinity).
 
 With `grading_workers > 0`, a generated raw JSON appears immediately with
 `grading_status: pending`; the same file is atomically replaced when its grade
@@ -399,3 +411,10 @@ Source of truth: [CLI](../script/tah/evaluation/eval.py),
 [job runner](../tah/evaluate/jobs.py), [backends](../tah/evaluate/backends.py),
 [config loading](../tah/model/tah_model.py),
 [deciders](../tah/model/iter_decider.py), [sampling](../tah/model/utils.py).
+
+## Evaluations for the research report
+
+Evaluations whose results go into the report follow the fixed protocol in
+[report/PROTOCOL.md](../report/PROTOCOL.md): which benchmarks, seeds, token
+limits and statistical analysis are used, and how new checkpoints are compared
+with the baseline.
