@@ -47,11 +47,22 @@ def main():
     zero['summary']['common_decision_mismatches']=0
     zero['summary']['pass_count_mismatches']=0
     for depth in zero['summary']['per_depth']:depth['common_decision_mismatches']=0
-    assert chapter.ratio_cells([zero])[:2]==['0.000','0.000']
+    assert chapter.ratio_cells([zero])[:2]==['0.00','0.00']
     zero['noise_limits']['pass_count_mismatches']=0
     for depth in zero['decision_limits']['per_depth']:depth['reference_flips']=0
     assert chapter.ratio_cells([zero])[:2]==['exact','exact']
     print('Ratio labels distinguish zero engine errors from exact agreement: PASS')
+    chapter.exact_section()
+    with tempfile.TemporaryDirectory(prefix='.check-',dir=ROOT) as temporary:
+        original=chapter.DATA;chapter.DATA=Path(temporary)
+        try:
+            bad=json.loads((original/'exact.json').read_text());bad['tiny']['mlp3']['top1_mismatches']=1
+            (chapter.DATA/'exact.json').write_text(json.dumps(bad))
+            try:chapter.exact_section()
+            except ValueError:pass
+            else:raise AssertionError('Non-exact level-0 data accepted')
+        finally:chapter.DATA=original
+    print('Level 0: exact data accepted, a single mismatch rejected: PASS')
     policy=chapter.read('method.json')['confirmatory']
     with tempfile.TemporaryDirectory(prefix='.check-',dir=ROOT) as temporary:
         tmp=Path(temporary);chapter.DATA=tmp/'data';chapter.TABLES=tmp/'tables'

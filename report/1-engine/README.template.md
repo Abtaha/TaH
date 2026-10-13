@@ -4,80 +4,96 @@
 
 ## Summary
 
-The TaH v1 inference engine reproduces the reference token/depth, attention-mask, soft-input, low-rank adapter (LoRA) and bfloat16 (bf16) stopping semantics while batching requests at different internal depths. On the {{gpu}}, the fastest measured configuration delivers **{{headline_rate}} tokens/s ({{headline_speedup}}× the reference backend)**. Numerical comparisons pass limits derived from the reference's own bf16 execution-layout noise. Scheduling and memory stress checks support correct operation under preemption and overflow. {{#r1pending}}Accuracy equivalence remains pending the pre-registered [R1 protocol](../PROTOCOL.md); the exploratory engine-minus-reference difference is {{delta}} percentage points.{{/r1pending}}{{#r1complete}}The pre-registered [R1 analysis](../PROTOCOL.md) is reported below; the earlier exploratory engine-minus-reference difference is {{delta}} percentage points.{{/r1complete}}
+Think-at-Hard (TaH) lets a learned decider send hard tokens through the model a second time, using a low-rank adapter (LoRA). The reference implementation is slow: a Python loop handles one token at a time, extra passes are separate model calls and batches are padded to the longest request.
+
+The engine runs the same algorithm with mixed-depth batches, a shared key/value (KV) cache and CUDA graphs. Its correctness rests on three steps: same algorithm (exact on CPU), each model step within {{noise_multiplier}}× the reference's own numerical noise, and accuracy within a pre-registered ±{{margin}} pp margin (R1: {{r1status}}; exploratory engine minus reference: {{delta}} pp). On the {{gpu}} it generates **{{headline_rate}} tokens/s, {{headline_speedup}}× the reference**.
 
 ## What the engine changes
 
-- **Depth-mixed rows:** depth counts internal model passes; each sequence contributes one row per step, so sequences can progress at different depths without separate model launches.
-- **Shared key/value (KV) cache pool:** page size one across all depth streams and GPU-built attention indices avoid padding to the longest request while preserving position/depth visibility.
-- **FlashInfer and row-masked LoRA:** ragged attention and per-row adapter activation preserve pass semantics without duplicated model weights.
-- **Exact-batch CUDA graphs:** captured decode operations reduce launch overhead while preserving matrix shapes.
-- **Swap and restart:** pinned-host preemption preserves request state; restarting from the prompt when the host budget is exhausted allows completion.
-{{#overlap}}- **Overlap scheduling:** preparing the next step while GPU work runs reduces idle time; a delayed status read changes ordinary batch composition, so identity is tested against replayed row sets.
-{{/overlap}}
+- **Mixed-depth batches:** one row per sequence per step, on its first or second pass, so no request waits for another's extra pass.
+- **Shared KV cache pool:** one-token pages avoid padding to the longest request.
+- **Row-masked LoRA:** the adapter is switched on per row; one copy of the weights serves both passes.
+- **CUDA graphs:** captured decode steps remove most launch overhead.
+{{#overlap}}- **Overlap scheduling:** the next step is prepared while the GPU runs.
+{{/overlap}}- **Swap and restart:** preempted requests move to host memory, or restart from the prompt if it is full.
+
 ## Results
 
-### Speed
+### Equivalence to the reference
 
-The speed workload (W-perf) uses {{workload_requests}} requests, up to {{output_cap}} generated tokens per request, and at most {{batch_size}} resident engine requests. Speedup is throughput divided by reference-backend throughput. These are single historical observations; engine timing excludes model load, capture and warmup, while reference timing uses {{reference_timing}} and retokenized output.
+The claim is that the engine is as correct as the original implementation. In bf16 there is no single correct output: the reference itself changes with batch size, padding and layout. So correct means: **the engine differs from the reference no more than the reference differs from itself.** Three levels test this.
 
-{{speed_table}}
+#### Level 0 — same algorithm (exact)
 
-[Throughput figure (PDF)](figures/throughput.pdf). Peak memory is in gibibytes (GiB): sampled whole-device usage for the reference, and allocated / reserved PyTorch memory for the engine; these scopes do not establish a memory reduction. In the graph step profile, kernels account for {{kernel_ms}} ms of {{wall_ms}} ms wall time, with the remainder mainly launches and idle time.
+On CPU, where results are deterministic, the engine's teacher-forced forward is compared with the reference at atol = rtol = 0: every logit coordinate, decision, pass count and top-1 token.
 
-**Reproduce:** `./reproduce.sh speed` — {{speed_runtime}}, {{speed_device}}; writes `data/speed.json` and refreshes the table/figure; `reference` refreshes its reference row ({{reference_runtime}}, {{reference_device}}).
+{{exact_table}}
 
-### Numerical equivalence
+Cap is the maximum passes per token; mismatches sum differing decisions, pass counts and top-1 tokens. The tiny models have {{tiny_layers}} layers and random LoRA weights; {{ctor_cases}} further random constructor variants (caps {{ctor_caps}}, {{ctor_layers}} layers) are exact too. Scope: exact checks cover the CPU path. The full model at full length was not run exactly because CPU compute is insufficient, and on GPU bf16 kernels make bit-exactness undefined; level 1 covers that.
 
-Reference-only self-noise is measured on the same sequences across execution layouts; logit/error-rate limits are {{noise_multiplier}}× that noise. Generated-sequence noise is registered before engine comparison; learned zero/small counts use a {{count_floor}}-event floor and margins have a reference-derived floor. Corpus-matched rules followed earlier fixture-limit failures, so this is mechanism validation, not an independently confirmatory accuracy test.
+**Reproduce:** `./reproduce.sh exact`: {{exact_runtime}}, {{exact_device}}; writes `data/exact.json`.
 
-For each disagreement column, the reported ratio is:
+#### Level 1 — each model step is indistinguishable from reference noise
 
-**Engine/reference disagreement ratio = (engine-versus-reference disagreement rate) / (reference-versus-reference disagreement rate).**
-
-The numerator compares an engine execution with a reference execution. The denominator compares two executions of the reference backend on the same sequences but with different execution layouts. Thus, the denominator measures how often the reference disagrees with itself because of numerical layout effects. These are ratios of disagreement rates, not disagreement percentages; the dash in “engine–reference” denotes the two executions being compared, not subtraction.
-
-The **full-logit RMSE ratio** instead divides engine-versus-reference root mean squared logit error by reference-versus-reference root mean squared logit error.
+On the GPU, each cell is a ratio: engine-versus-reference disagreement divided by reference-versus-reference disagreement on the same sequences. 1.0 means the engine differs from the reference exactly as much as the reference differs from itself under another execution layout; the limit is {{noise_multiplier}}.
 
 {{equivalence_table}}
 
-- **Continue/stop disagreement:** fraction of decisions that differ on whether to take another internal pass, counting only token positions where both executions reach the depth being compared.
-- **Final pass-count disagreement:** fraction of token positions with different final numbers of internal passes.
-- **Full-logit RMSE:** root mean squared difference in logits (the model's unnormalized token scores), across all vocabulary entries and compared positions.
-- **Highest-logit token disagreement:** fraction of positions where the token with the largest logit differs; this is not disagreement between sampled outputs.
+Decision flips: differing continue/stop decisions; pass-count mismatch: tokens with another number of passes; top-1 mismatch: a different highest-logit token. Cells are maxima over layouts ([detail](APPENDIX.md)). `real` is the released TaH-plus 1.7B; the others are synthetic models for other decider paths.
 
-Each cell takes its own maximum ratio over full-sequence, cached and generated-sequence comparisons; continue/stop also maximizes over internal depths. “Exact” means both comparisons have zero disagreements. PASS checks every layout against its limits, including additional full/retained-logit errors and decision margins (distance from the stopping threshold). `real` is the released checkpoint; `mlp3/mlp1` use learned stopping with different maximum depths, and `label3` uses supplied depth labels. [Per-layout detail](APPENDIX.md).
+Logit RMSE ratios on long contexts stay between {{long_min}} and {{long_max}}; the sampler's total variation distance on identical logits is {{tv}} per token; greedy generation passes the first-divergence check for {{greedy_passed}}/{{checkpoint_count}} checkpoints. This level is the most sensitive: a defect large enough to move accuracy would show as a multiple of the noise, not as ratios of at most {{ratio_max}}.
 
-**Reproduce:** `./reproduce.sh equivalence` — {{equivalence_runtime}}, {{equivalence_device}}; writes `data/equivalence.json` after `fixtures`.
+**Reproduce:** `./reproduce.sh equivalence` ({{equivalence_runtime}}, {{equivalence_device}}, after `fixtures`) writes `data/equivalence.json`; `./reproduce.sh diagnostics` ({{diagnostics_runtime}}, {{diagnostics_device}}) writes `data/diagnostics.json`.
 
-Long-context RMSE/noise ratios span {{long_min}}–{{long_max}}, with no systematic growth by position. On identical logits, sampler total variation distance (half the summed absolute differences in token probabilities) averages {{tv}} per token, with no systematic increase in the number of tokens eligible for sampling. Greedy generation, which selects the highest-probability token, passes the first-output-divergence sanity check for {{greedy_passed}}/{{checkpoint_count}} checkpoints.
+#### Level 2 — benchmark accuracy is equivalent (pre-registered R1)
 
-**Reproduce:** `./reproduce.sh diagnostics` — {{diagnostics_runtime}}, {{diagnostics_device}}; writes `data/diagnostics.json`; greedy results come from `equivalence`.
+Workload: MATH500 problems 0–199 and GPQA-Diamond (198), 2 samples each, up to {{cap}} new tokens, temperature 0.6. The pre-registered test ([protocol](../PROTOCOL.md)) is a TOST on per-problem paired differences: the {{confidence}}% confidence interval (CI) of engine minus reference over {{problems}} problems must lie inside ±{{margin}} pp. Two reference runs are compared the same way, showing natural run-to-run spread.
 
-### Accuracy
+{{runs_table}}
 
-{{r1_table}}
+{{#r1pending}}**Confirmatory R1: pending.** The reference run (seed 1234) and frozen-engine runs are not yet archived in `data/r1/`; `analyze.py` then adds the TOST rows.
+{{/r1pending}}{{#r1complete}}{{r1_table}}
 
-R1 is the pre-registered accuracy-equivalence comparison. It requires a paired {{confidence}}% confidence interval (CI) inside ±{{margin}} percentage points (pp); the table also reports reference-versus-reference noise and the candidate/reference ratio of mean internal passes per generated token. TOST denotes the two one-sided equivalence tests; the pass-count check applies the protocol’s relative tolerance. **Exploratory:** averaging repeats and both engine seeds within each of {{problems}} problems gives a pooled difference of **{{delta}} pp**, descriptive normal {{confidence}}% CI **[{{ci_low}}, {{ci_high}}] pp**, **z = {{z}}**. The difference is engine minus reference accuracy; z divides it by its paired standard error. This estimate neither establishes equivalence nor identifies the cause of the gap.
+The reference-versus-reference rows show the natural spread; the engine rows are the R1 test.
+{{/r1complete}}
+**Exploratory estimate** (not the R1 test; one reference run; engine seeds 42 and 1234 predate the frozen engine):
 
-**Reproduce:** `./reproduce.sh accuracy` — {{accuracy_runtime}}, {{accuracy_device}}; writes curated `data/r1/` inputs and refreshes `tables/r1.tex`. `./reproduce.sh exploratory` reimports the historical CSVs on CPU.
+{{exploratory_table}}
+
+These data do not show equivalence: the first interval extends beyond -{{margin}} pp (z = {{z}}). One reference run's sampling noise is not averaged out: its two repeats differ by {{split_delta}} pp at one sample per problem, and engine seeds differ by up to {{engine_spread}} pp per benchmark. The confirmatory runs decide.
+
+**Reproduce:** `./reproduce.sh accuracy`: {{accuracy_runtime}}, {{accuracy_device}}; writes `data/r1/`. `./reproduce.sh exploratory` reimports the CSVs on CPU.
+
+### Speed
+
+Workload: {{workload_requests}} requests, up to {{output_cap}} new tokens each, at most {{batch_size}} resident; timings exclude load, capture and warmup. Peak memory: allocated for the engine, sampled device peak for the reference (roughly comparable).
+
+{{speed_table}}
+
+[Throughput figure](figures/throughput.pdf). In a profiled CUDA-graph step, kernels take {{kernel_ms}} of {{wall_ms}} ms; the rest is launch and idle time.
+
+**Reproduce:** `./reproduce.sh speed`: {{speed_runtime}}, {{speed_device}}; writes `data/speed.json`. `reference` refreshes the reference row ({{reference_runtime}}, {{reference_device}}).
 
 ### Robustness
 
 {{robustness_table}}
 
-Output-token counts are totals over all requests; “clean” means all KV slots were released and no swapped state remained. The generation stress allows {{stress_cap}} tokens per request; the prompt test mixes a {{long_prompt}}-token prompt with short requests and allows {{prompt_new}} new tokens per request. Swap preserves tokens/pass counts at fixed composition; the tiny synthetic CUDA overflow test completes after {{restart_count}} restarts with clean cache accounting.{{#overlap}} Overlap also preserves tokens, decisions and pass counts against replay of identical row sets, including forced swap/restart.{{/overlap}}
+Clean: every KV slot released, nothing swapped out. Stress generation allows {{stress_cap}} tokens per request; the prompt test mixes a {{long_prompt}}-token prompt with short ones; the overflow test completes after {{restart_count}} restarts.{{#overlap}} Overlap replays identical row sets with identical tokens, decisions and counts, including forced swap and restart.{{/overlap}}
 
-**Reproduce:** `./reproduce.sh robustness` — {{robustness_runtime}}, {{robustness_device}}; writes `data/robustness.json`.
+**Reproduce:** `./reproduce.sh robustness`: {{robustness_runtime}}, {{robustness_device}}; writes `data/robustness.json`.
+
+### Portability
+
+Validated on an {{port_device}} (compute capability {{port_cc}}, driver {{port_driver}}, CUDA {{port_cuda}}, torch {{port_torch}}): the default suite passed ({{port_passed}} passed, {{port_skipped}} skipped for missing development fixtures), eager and CUDA-graph runs of a {{port_smoke_requests}}-request smoke workload were identical, and overlap identity passed on {{port_overlap_requests}} requests. This shows correctness on that machine, not bitwise equality across GPUs. Only the operator's summary is archived.
+
+**Reproduce:** `dev-guide/engine.md`, "Validating on a new GPU or machine"; `curate.py port` writes `data/port.json`.
 
 ## Limitations and negative results
 
-- Compilation stays off: selected-bucket throughput changes by {{compile_delta}}% relative to CUDA graphs without compilation, and the learned synthetic checkpoint reports {{compile_gate}} for numerical parity and {{compile_greedy}} for greedy generation.
-- L40S portability is unverified; the numerical and exploratory accuracy evidence predates overlap.
-- Restart discards work and may change sampled output when batch composition changes.
-- Exploratory accuracy reuses one recovered reference run; comparisons are correlated and its RNG stream cannot be replayed exactly.
-
-**Reproduce:** `./reproduce.sh negative` — {{negative_runtime}}, {{negative_device}}; writes `data/negative.json` after `fixtures`.
+- Exact (level 0) checks do not cover the full model at full length (CPU compute).
+- `torch.compile` stays off: throughput changes by {{compile_delta}}%, and parity is {{compile_gate}} and greedy generation {{compile_greedy}} on the synthetic learned checkpoint (`./reproduce.sh negative`: {{negative_runtime}}, {{negative_device}}).
+- A restart discards work and may change sampled output.
+- Exploratory accuracy rests on one reference run.
 
 ## Reproduce and data
 
@@ -89,19 +105,17 @@ bash report/1-engine/reproduce.sh
 bash report/1-engine/reproduce.sh speed --dry-run
 ```
 
-The second command lists named steps; `--dry-run` prints exact commands. Executing a named step runs GPU work, keeps full outputs in `reproduction/`, extracts the table metrics into `data/`, updates hashes, and reruns analysis. Fixtures require local models/datasets; see [script details](scripts/README.md) and the [R1 input contract](scripts/R1.md).
+Steps and data files: [scripts/README.md](scripts/README.md#data-files).
 
 | Result | Step | Command family | Estimate / need | Data written |
 | --- | --- | --- | --- | --- |
-| Fixture prerequisite | `fixtures` | `generate_fixtures`; export limits | {{fixtures_runtime}} / {{fixtures_device}} | `reproduction/fixtures/` |
-| Reference row | `reference` | harness `eval.py --backend tah`; device monitor | {{reference_runtime}} / {{reference_device}} | `speed.json` |
-| Speed / figure | `speed` | `engine_check --gate perf/profile` | {{speed_runtime}} / {{speed_device}} | `speed.json` |
-| Numerical / greedy | `equivalence` | `test_gtf`; cached replay; `generated_gtf`; `engine_check --gate gen` | {{equivalence_runtime}} / {{equivalence_device}} | `equivalence.json` |
-| Long context / sampler | `diagnostics` | `scripts/longctx.py` | {{diagnostics_runtime}} / {{diagnostics_device}} | `diagnostics.json` |
-| R1 / exploratory | `accuracy` / `exploratory` | `run_protocol.py run/merge`; CSV import | {{accuracy_runtime}} / {{accuracy_device}}; CPU import | `r1/`; `evaluations/` |
-| Robustness | `robustness` | `engine_check --gate swap/robust/long-prompt/overlap-identity`; restart test | {{robustness_runtime}} / {{robustness_device}} | `robustness.json` |
-| Compile failure | `negative` | compiled `perf`, `gen`, `generated_gtf` | {{negative_runtime}} / {{negative_device}} | `negative.json` |
-
-Data guide: `speed.json` holds counts, seconds, byte peaks and profile milliseconds; `equivalence.json` holds aggregate errors/counts, reference bounds and registration hashes/times; `diagnostics.json` holds position-bucket errors and dimensionless sampler statistics; `robustness.json` holds completion/cleanup and identity audits; `negative.json` holds compile comparisons; `method.json` holds declared policies and runtime estimates. `evaluations/{reference-exploratory,engine-seed42,engine-seed1234}/{math500,gpqa}/detailed_results.csv` retains each sample's problem/repeat key, correctness and token/pass summaries (times in seconds); only correctness is used for the exploratory estimate. `MANIFEST.json` records every retained file, schema, source path/hash/date, checkpoint hashes, environment and available code provenance. Complete raw outputs remain at those source paths.
-
-To refresh performance, rerun `speed`, or replace the selected experiment paths in `scripts/sources.json` and run `python report/1-engine/scripts/curate.py speed` followed by analysis; this replaces `speed.json` and its manifest entry. The historical reference observation is retained explicitly; `reference` refreshes it using CSV batch-inference timing and sampled device memory, with that scope labelled. New runtime hashes must accompany new engine measurements.
+| Level 0 | `exact` | `pytest` (model, CPU probes) | {{exact_runtime}} / {{exact_device}} | `exact.json` |
+| Fixtures | `fixtures` | `generate_fixtures` | {{fixtures_runtime}} / {{fixtures_device}} | `reproduction/fixtures/` |
+| Reference row | `reference` | `eval.py --backend tah` | {{reference_runtime}} / {{reference_device}} | `speed.json` |
+| Speed, figure | `speed` | `engine_check` perf, profile | {{speed_runtime}} / {{speed_device}} | `speed.json` |
+| Level 1 | `equivalence` | `test_gtf`; cached replay; `generated_gtf`; `engine_check` gen | {{equivalence_runtime}} / {{equivalence_device}} | `equivalence.json` |
+| Long context, sampler | `diagnostics` | `longctx.py` | {{diagnostics_runtime}} / {{diagnostics_device}} | `diagnostics.json` |
+| Level 2 | `accuracy`, `exploratory` | `run_protocol.py`; CSV import | {{accuracy_runtime}} / {{accuracy_device}}; CPU import | `r1/`; `evaluations/` |
+| Robustness | `robustness` | `engine_check` (four gates); restart test | {{robustness_runtime}} / {{robustness_device}} | `robustness.json` |
+| Portability | operator | `dev-guide/engine.md` | target GPU | `port.json` |
+| Compile | `negative` | compiled `perf`, `gen`, `generated_gtf` | {{negative_runtime}} / {{negative_device}} | `negative.json` |

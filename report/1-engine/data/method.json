@@ -38,6 +38,10 @@
       "device": "GPU",
       "runtime": "2\u20134 h"
     },
+    "exact": {
+      "device": "CPU",
+      "runtime": "under 1 min"
+    },
     "exploratory": {
       "device": "CPU",
       "runtime": "seconds"

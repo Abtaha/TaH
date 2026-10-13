@@ -10,6 +10,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 sys.dont_write_bytecode=True
 from curate import Collector, dump, CHECKPOINTS
@@ -70,6 +71,11 @@ def plan(step,out):
         report,_,_=generated('mlp3',True);sources['negative/parity']=report
         sources['negative/greedy']=check('negative-greedy','gen','--checkpoint','mlp3','--compile')
         commands[-1]['expected_failure']=True
+    elif step=='exact':
+        # CPU only. The tests write their reports to data/engine/wp3/cpu-pytest/.
+        for label,test in [('exact-model','test_model.py'),('exact-probes','test_cpu_probes.py')]:
+            add(label,['-m','pytest','-q','-o','addopts=','tah/engine/tests/'+test],gpu=False)
+        sources.update({k:v for k,v in json.loads((SCRIPTS/'sources.json').read_text()).items() if k.startswith('exact/')})
     elif step=='accuracy':
         for backend,seeds in [('tah',[1234]),('tah_engine',[42,1234,2024])]:
             for seed in seeds:
@@ -134,6 +140,11 @@ def main():
     out.mkdir(parents=True,exist_ok=True)
     if args.step in ('equivalence','negative') and not (out/'fixture-limits/tolerances.json').exists():
         parser.error('Run fixtures first using the same --output-root')
+    if args.step=='exact':
+        need=['data/engine/fixtures/cpu-tiny/manifest.json','data/engine/fixture-models/tiny/label3','data/engine/fixture-models/full/label3','models/TaH-plus-1.7B']
+        absent=[x for x in need if not (REPO/x).exists()]
+        if absent:parser.error('Missing prerequisites (tests would skip silently): '+', '.join(absent))
+    started=time.time()
     inventory=source_inventory()
     if args.step=='accuracy':
         freeze=out/'r1-engine-freeze.json'
@@ -151,6 +162,9 @@ def main():
             line=next(x for x in log.read_text().splitlines() if 'Forced restart CUDA report:' in x)
             value=json.loads(line.split('Forced restart CUDA report:',1)[1]);value['status']='PASS';dump(out/'restart.json',value)
     if inventory!=source_inventory():raise ValueError('Engine changed during the experiment; outputs retained but not imported')
+    if args.step=='exact':
+        stale=[v for k,v in sources.items() if k!='exact/tests' and k!='exact/fixtures' and (REPO/v).stat().st_mtime<started]
+        if stale:raise ValueError('Reports not rewritten by this run (tests skipped?): '+', '.join(stale))
     if args.step=='exploratory':
         manifest=json.loads((DATA/'MANIFEST.json').read_text())
         for name,entry in list(manifest['files'].items()):

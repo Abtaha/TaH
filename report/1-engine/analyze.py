@@ -35,7 +35,8 @@ def read(path):
 
 
 def fmt(x, digits=3):
-    return f'{x:.{digits}f}'
+    text = f'{x:.{digits}f}'
+    return text[1:] if text.startswith('-') and float(text) == 0 else text
 
 
 def esc(s):
@@ -142,7 +143,8 @@ def r1_section(policy):
     """
     def skip(message):
         (TABLES/'r1-analysis.json').unlink(missing_ok=True)
-        return table('r1', ['Analysis', 'Status'], [['Confirmatory R1', 'Pending: ' + message]])
+        table('r1', ['Analysis', 'Status'], [['Confirmatory R1', 'Pending: ' + message]])
+        return 'Pending: ' + message + '.'
     if not (DATA/'r1/inputs.json').exists():
         return skip('Registered runs not archived')
     index=read('r1/inputs.json')
@@ -210,21 +212,97 @@ def r1_section(policy):
     return table('r1',['Candidate vs confirmatory reference','Dataset','Problems','Accuracy difference (pp)','Student-t CI (pp)','TOST verdict','Mean passes: candidate/reference','Pass-count check'],rows)+"\n\nDeclared deviations: "+json.dumps(index.get('deviations',[]))
 
 
-def problem_scores(run,policy):
-    scores={}
+def sample_groups(run,policy):
+    groups={}
     for dataset,count in policy['problems'].items():
         rows=list(csv.DictReader(io.StringIO(raw(f'evaluations/{run}/{dataset}/detailed_results.csv').decode())))
-        groups={}
+        found={}
         for row in rows:
             key=(dataset,row['problem_id']);sample=int(row['sample_idx'])
-            group=groups.setdefault(key,{})
+            group=found.setdefault(key,{})
             if sample in group:raise ValueError('Duplicate exploratory sample')
             group[sample]=row['is_correct'].lower()=='true'
-        assert len(groups)==count
-        for key,group in groups.items():
+        assert len(found)==count
+        for group in found.values():
             assert set(group)==set(range(policy['repeats']))
-            scores[key]=st.mean(group.values())
-    return scores
+        groups.update(found)
+    return groups
+
+
+def problem_scores(run,policy):
+    return {key:st.mean(group.values()) for key,group in sample_groups(run,policy).items()}
+
+
+RUNS=[('reference-exploratory','Reference, seed 42'),('engine-seed42','Engine, seed 42'),
+      ('engine-seed1234','Engine, seed 1234'),('engine-seed2024','Engine, seed 2024 (frozen engine)')]
+
+
+def run_table(policy):
+    rows=[];acc={}
+    for run,label in RUNS:
+        accuracy={}
+        for dataset in policy['problems']:
+            data=list(csv.DictReader(io.StringIO(raw(f'evaluations/{run}/{dataset}/detailed_results.csv').decode())))
+            accuracy[dataset]=sum(r['is_correct'].lower()=='true' for r in data)/len(data)
+        acc[run]=accuracy
+        rows.append([label,fmt(100*accuracy['math500'],1),fmt(100*accuracy['gpqa'],1)])
+    text=table('accuracy_runs',['Run','MATH500 acc. (%)','GPQA acc. (%)'],rows)
+    engine=[r for r,_ in RUNS[1:]]
+    spread=max(max(acc[r][d] for r in engine)-min(acc[r][d] for r in engine) for d in policy['problems'])
+    return dict(runs_table=text,engine_spread=fmt(100*spread,1),cap=str(policy['max_new_tokens']))
+
+
+def exploratory(policy):
+    """Paired exploratory comparisons; every row uses the same per-problem analysis."""
+    q=st.NormalDist().inv_cdf((1+policy['confidence'])/2);repeats=policy['repeats']
+    scores={run:problem_scores(run,policy) for run,_ in RUNS}
+    ref=sample_groups('reference-exploratory',policy)
+    comparisons=[('Engine (seeds 42, 1234) minus reference',f'{2*repeats} vs {repeats}',
+                  paired(scores['reference-exploratory'],[scores['engine-seed42'],scores['engine-seed1234']])),
+                 ('Engine (seed 2024) minus reference',f'{repeats} vs {repeats}',
+                  paired(scores['reference-exploratory'],[scores['engine-seed2024']])),
+                 ('Reference repeat 0 minus repeat 1','1 vs 1',
+                  paired({k:float(g[1]) for k,g in ref.items()},[{k:float(g[0]) for k,g in ref.items()}]))]
+    interval=lambda delta,se:(fmt(100*(delta-q*se),1),fmt(100*(delta+q*se),1))
+    rows=[[label,samples,fmt(100*delta,1),'[%s, %s]'%interval(delta,se)] for label,samples,(n,delta,se,_) in comparisons]
+    (n,delta,se,z),(_,frozen,_,_),(_,half,half_se,_)=[c[2] for c in comparisons]
+    low,high=interval(delta,se);split_low,split_high=interval(half,half_se)
+    return dict(exploratory_table=table('exploratory',['Comparison','Samples per problem','Difference (pp)','90% CI (pp)'],rows),
+                delta=fmt(100*delta,1),ci_low=low,ci_high=high,z=fmt(z,1),problems=str(n),confidence=fmt(100*policy['confidence'],0),
+                margin=str(policy['equivalence_margin_pp']),split_delta=fmt(100*half,1),split_low=split_low,split_high=split_high,
+                frozen_delta=fmt(100*frozen,1))
+
+
+def exact_section():
+    """Level 0: every recorded engine-vs-reference difference must be exactly zero."""
+    d=read('exact.json');assert d['tolerance']=={'atol':0,'rtol':0}
+    def mismatches(items):return sum(i[k] for i in items for k in ('decision_mismatches','visited_mismatches','pass_count_mismatches','top1_mismatches'))
+    def add(label,items):
+        worst=max(i['logit_max_abs'] for i in items)
+        if mismatches(items) or worst or any(i['logit_squared_sum'] for i in items):
+            raise ValueError('Level 0 data is not exact: '+label)
+        total=lambda key:sum(i[key] for i in items)
+        return [label,total('records'),total('positions'),f"{total('coordinates'):,}",mismatches(items),fmt(worst,1)]
+    tiny=d['tiny'];names=('mlp3','mlp1','label3');t=[tiny[c] for c in names];c=d['constructor']
+    probes=d['probes'];lengths={p['length'] for p in probes.values()};assert len(lengths)==1;length=lengths.pop()
+    rows=[add('Tiny mlp3, mlp1, label3 (caps '+', '.join(str(tiny[n]['depth_cap']) for n in names)+')',t),
+          add(f"Tiny label3, one {d['long']['length']}-token sequence",[d['long']]),
+          add(f"Released TaH-plus 1.7B, {length} tokens",[probes['real']]),
+          add(f"Full-size synthetic mlp3, mlp1, label3, {length} tokens each",[probes[n] for n in names])]
+    text=table('exact',['Model','Records','Positions','Logit coordinates','Mismatches','Max logit difference'],
+               [[str(x) for x in r] for r in rows])
+    assert len(d['tiny_layers'])==1
+    return dict(exact_table=text,tiny_layers=str(d['tiny_layers'][0]),ctor_cases=str(c['cases']),ctor_caps=f"{min(c['caps'])}–{max(c['caps'])}",
+                ctor_layers=f"{min(c['layers'])}–{max(c['layers'])}")
+
+
+def port_section():
+    d=read('port.json')
+    assert d['status']==d['wsmoke']['status']==d['overlap_identity']['status']=='PASS' and d['wsmoke']['eager_graph_identical']
+    return dict(port_device=d['device'],port_vram=str(d['vram_gb']),port_cc=d['compute_capability'],port_driver=d['driver'].split('.')[0],
+                port_cuda=d['cuda'],port_torch=d['torch'],port_passed=str(d['default_suite']['passed']),port_skipped=str(d['default_suite']['skipped']),
+                port_seconds=fmt(d['default_suite']['seconds'],0),port_smoke_requests=str(d['wsmoke']['requests']),
+                port_overlap_requests=str(d['overlap_identity']['requests']))
 
 
 def ratio(value,noise):
@@ -244,7 +322,7 @@ def ratios(report):
 
 def ratio_cells(reports):
     maxima=[max(values) for values in zip(*(ratios(r) for r in reports))]
-    cells=[fmt(value,3) for value in maxima]
+    cells=[fmt(value,2) for value in maxima]
     # Exact means both event counts are zero, not merely a zero numerator.
     if all(r['summary']['common_decision_mismatches']==0 and all(d['reference_flips']==0 for d in r['decision_limits']['per_depth']) for r in reports):
         cells[0]='exact'
@@ -258,19 +336,19 @@ def main():
     TABLES.mkdir(exist_ok=True);(ROOT/'figures').mkdir(exist_ok=True)
     manifest=verify();policy=read('method.json');perf=read('speed.json');eq=read('equivalence.json')
     values={'reference_timing':perf['reference'].get('timing_scope','recorded coarse inference stopwatch')};baseline=perf['reference']['published_tokens_per_second']
-    rows=[['Reference backend',fmt(baseline,2),fmt(1,2),fmt(perf['reference']['peak_sampled_memory_mib']/1024,2)+' device']]
+    rows=[['Reference backend',fmt(baseline,0),fmt(1,2),fmt(perf['reference']['peak_sampled_memory_mib']/1024,1)]]
     labels=['Reference'];rates=[baseline]
     names={'eager':'Eager','graphs':'CUDA graphs','overlap':'+ overlap'}
     for key in ('eager','graphs','overlap'):
         if key not in perf['runs']:continue
         r=perf['runs'][key];rate=r['run']['generated_tokens']/r['run']['wall_seconds']
-        rows.append([names[key],fmt(rate,2),fmt(rate/baseline,2),fmt(r['peak_gpu_allocated_bytes']/2**30,2)+' / '+fmt(r['peak_gpu_reserved_bytes']/2**30,2)])
+        rows.append([names[key],fmt(rate,0),fmt(rate/baseline,2),fmt(r['peak_gpu_allocated_bytes']/2**30,1)])
         labels.append(names[key]);rates.append(rate)
-    values['speed_table']=table('speed',['Backend','Tokens/s','Speedup vs reference','Peak memory (GiB)'],rows)
+    values['speed_table']=table('speed',['Backend','Tokens/s','Speedup','Peak memory (GiB)'],rows)
     pdf_bars(ROOT/'figures/throughput.pdf',labels,rates)
     graph=perf['runs']['graphs'];p=perf['profile']
-    values.update(headline_rate=fmt(rates[-1],1),headline_speedup=fmt(rates[-1]/baseline,1),gpu=graph['device'],kernel_ms=fmt(p['mean_kernel_gpu_ms'],1),wall_ms=fmt(p['unprofiled_mean_step_ms'],1),noise_multiplier=str(policy['noise_multiplier']),count_floor=str(policy['generated_mlp_count_floor']),workload_requests=str(graph['requests']),output_cap=str(graph['max_new_tokens']),batch_size=str(graph['batch_size']))
-    rows=[];detail=[]
+    values.update(headline_rate=fmt(rates[-1],0),headline_speedup=fmt(rates[-1]/baseline,1),gpu=graph['device'],kernel_ms=fmt(p['mean_kernel_gpu_ms'],1),wall_ms=fmt(p['unprofiled_mean_step_ms'],1),noise_multiplier=str(policy['noise_multiplier']),count_floor=str(policy['generated_mlp_count_floor']),workload_requests=str(graph['requests']),output_cap=str(graph['max_new_tokens']),batch_size=str(graph['batch_size']))
+    rows=[];detail=[];largest=[]
     for checkpoint in CHECKPOINTS:
         reports=[r for r in eq['reports'] if r['checkpoint']==checkpoint]
         assert {r['layout'] for r in reports}=={'full','cached-1','cached-256','generated'}
@@ -280,10 +358,12 @@ def main():
                 assert r['registration']['saved_unix_time']==r['limits_saved_unix_time']<r['comparison_unix_time']
             detail.append([checkpoint,r['layout'],*ratio_cells([r]),status])
         rows.append([checkpoint,*ratio_cells(reports),'PASS' if all(gate(r)=='PASS' for r in reports) else 'FAIL'])
-    columns=['Checkpoint','Continue/stop disagreement ratio','Final pass-count disagreement ratio','Full-logit RMSE ratio','Highest-logit token disagreement ratio','Gate result']
+        largest.append(max(max(values) for values in zip(*(ratios(r) for r in reports))))
+    columns=['Checkpoint','Decision flips','Pass-count mismatch','Logit RMSE','Top-1 mismatch','Result']
     values['equivalence_table']=table('equivalence',columns,rows)
+    values['ratio_max']=fmt(max(largest),2)
     appendix=table('equivalence_layouts',['Checkpoint','Layout',*columns[1:]],detail)
-    (ROOT/'APPENDIX.md').write_text('# Per-layout numerical equivalence\n\nEach disagreement ratio divides the engine-versus-reference disagreement rate by the reference-versus-reference disagreement rate. The denominator compares two reference executions of the same sequences under different execution layouts. The full-logit RMSE ratio divides engine-versus-reference RMSE by reference-versus-reference RMSE. Continue/stop compares decisions at jointly visited depths; final pass counts compare complete token positions. Full-logit RMSE is the root mean squared logit difference; highest-logit disagreement compares the token with the largest score. Each continue/stop cell maximizes over depths; exact means both counts are zero.\n\n'+appendix+'\n\nRatios and gate scope are defined in [the chapter](README.md#numerical-equivalence).\n')
+    (ROOT/'APPENDIX.md').write_text('# Per-layout numerical equivalence\n\nEach cell is the engine-versus-reference rate divided by the reference-versus-reference rate on the same sequences (1.0 = the engine differs from the reference as much as the reference differs from itself under a different execution layout; limit 1.5). Decision flips compare continue/stop decisions (maximum over depths); pass-count mismatch compares final passes per token; logit RMSE is the root mean squared logit difference; top-1 mismatch compares the highest-logit token. Exact means both counts are zero. Layouts: full sequence, cached with 1 or 256 tokens per step, and generated sequences.\n\n'+appendix+'\n\nSee [the chapter](README.md#numerical-equivalence).\n')
     values['greedy_passed']=str(sum(g['status']=='PASS' and g['median_first_divergence']>=g['median_limit'] for g in eq['greedy']))
     values['checkpoint_count']=str(len(CHECKPOINTS))
     diagnostics=read('diagnostics.json');rat=[]
@@ -291,9 +371,10 @@ def main():
         if bucket!='prompt':rat.append(item['rmse']/diagnostics['logits']['ref_chunk256_vs_ref_full'][bucket]['rmse'])
     values.update(long_min=fmt(min(rat),2),long_max=fmt(max(rat),2),tv=fmt(diagnostics['sampler']['engine_logits']['all']['tv_mean'],3))
     values['r1_table']=r1_section(policy['confirmatory'])
-    maps=[problem_scores(run,policy['confirmatory']) for run in ('reference-exploratory','engine-seed42','engine-seed1234')]
-    n,delta,se,z=paired(maps[0],maps[1:]);confidence=policy['confirmatory']['confidence'];q=st.NormalDist().inv_cdf((1+confidence)/2)
-    values.update(delta=fmt(100*delta,2),ci_low=fmt(100*(delta-q*se),2),ci_high=fmt(100*(delta+q*se),2),z=fmt(z,2),confidence=fmt(100*confidence,0),margin=str(policy['confirmatory']['equivalence_margin_pp']),problems=str(n))
+    values.update(run_table(policy['confirmatory']))
+    values.update(exploratory(policy['confirmatory']))
+    values.update(exact_section())
+    values.update(port_section())
     robust=read('robustness.json');tests=robust['tests'];rows=[]
     for key,label in [('swap','Swap identity'),('stress','Long generation'),('prompt','Long + short prompts'),('restart','Overflow restart')]:
         r=tests[key];audit=r['kv_audit'];run=r['run']
@@ -304,11 +385,12 @@ def main():
     overlap=robust.get('overlap')
     if overlap:assert overlap['rows_identical'] and overlap['decisions_identical'] and overlap['tokens_counts_identical'] and overlap['status']=='PASS'
     neg=read('negative.json');compiled=neg['compiled']['run'];control=neg['graphs']['run']
-    values['compile_delta']=fmt(100*((compiled['generated_tokens']/compiled['wall_seconds'])/(control['generated_tokens']/control['wall_seconds'])-1),2)
+    values['compile_delta']=fmt(100*((compiled['generated_tokens']/compiled['wall_seconds'])/(control['generated_tokens']/control['wall_seconds'])-1),0)
     values['compile_gate']=gate(neg['parity']);values['compile_greedy']=neg['greedy']['status']
     template=(ROOT/'README.template.md').read_text()
     # Conditional prose remains in the editable template.
-    for key,enabled in [('r1pending','Pending' in values['r1_table']),('r1complete','Pending' not in values['r1_table'])]:
+    values['r1status']='pending' if values['r1_table'].startswith('Pending') else 'complete (table below)'
+    for key,enabled in [('r1pending',values['r1_table'].startswith('Pending')),('r1complete',not values['r1_table'].startswith('Pending'))]:
         template=re.sub(r'\{\{#'+key+r'\}\}(.*?)\{\{/'+key+r'\}\}',lambda m:m[1] if enabled else '',template,flags=re.S)
     template=re.sub(r'\{\{#overlap\}\}(.*?)\{\{/overlap\}\}',lambda m:m[1] if 'overlap' in perf['runs'] else '',template,flags=re.S)
     for step,item in policy['reproduction'].items():

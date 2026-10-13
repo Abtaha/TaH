@@ -1253,6 +1253,54 @@
         "pass_stat_tokens"
       ]
     },
+    "evaluations/engine-seed2024/gpqa/detailed_results.csv": {
+      "bytes": 34210,
+      "encoding": "original bytes",
+      "purpose": "Evaluation: sample grades/counts, raw generations, configuration, completion or job telemetry. Shared job metrics must be counted once.",
+      "sha256": "c3ec3e588ca1b0b6be93e4813126ca7c0d6f7105b2a799d2707a2d28252bbe9f",
+      "source_bytes": 34210,
+      "source_mtime_utc": "2026-10-13T12:06:41.043700+00:00",
+      "source_path": "data/engine/wp10/wacc-seed2024-combined/gpqa/detailed_results.csv",
+      "source_sha256": "c3ec3e588ca1b0b6be93e4813126ca7c0d6f7105b2a799d2707a2d28252bbe9f",
+      "top_level_keys_or_columns": [
+        "problem_id",
+        "sample_idx",
+        "correct_answer",
+        "predicted_answer",
+        "has_answer",
+        "is_correct",
+        "input_tokens",
+        "output_tokens",
+        "processing_time",
+        "mean_passes_per_token",
+        "fraction_tokens_at_least_2_passes",
+        "pass_stat_tokens"
+      ]
+    },
+    "evaluations/engine-seed2024/math500/detailed_results.csv": {
+      "bytes": 39133,
+      "encoding": "original bytes",
+      "purpose": "Evaluation: sample grades/counts, raw generations, configuration, completion or job telemetry. Shared job metrics must be counted once.",
+      "sha256": "6b0c7d596dfad16a972bd2257773e0b6ddaea9fece22885681b31b2e3740e561",
+      "source_bytes": 39133,
+      "source_mtime_utc": "2026-10-13T12:06:40.567501+00:00",
+      "source_path": "data/engine/wp10/wacc-seed2024-combined/math500/detailed_results.csv",
+      "source_sha256": "6b0c7d596dfad16a972bd2257773e0b6ddaea9fece22885681b31b2e3740e561",
+      "top_level_keys_or_columns": [
+        "problem_id",
+        "sample_idx",
+        "correct_answer",
+        "predicted_answer",
+        "has_answer",
+        "is_correct",
+        "input_tokens",
+        "output_tokens",
+        "processing_time",
+        "mean_passes_per_token",
+        "fraction_tokens_at_least_2_passes",
+        "pass_stat_tokens"
+      ]
+    },
     "evaluations/engine-seed42/gpqa/detailed_results.csv": {
       "bytes": 34200,
       "encoding": "original bytes",
@@ -1349,11 +1397,105 @@
         "pass_stat_tokens"
       ]
     },
+    "exact.json": {
+      "bytes": 2929,
+      "encoding": "curated JSON",
+      "purpose": "Engine-vs-reference counts of the CPU comparisons asserted at atol=rtol=0 (tiny sets, 4096-token tiny probe, 8-token probes of full-size checkpoints, constructor cases).",
+      "sha256": "d9dac8fbbf540d8d0779e5dde7bac1ae6e5f830aade6bad25924e5ceaca9fc34",
+      "sources": [
+        {
+          "source_bytes": 385874,
+          "source_mtime_utc": "2026-10-11T18:17:36.419151+00:00",
+          "source_path": "data/engine/fixtures/cpu-tiny/manifest.json",
+          "source_sha256": "ba0108599697740f6a01e792759e434ae72d6622e3288a00d67893b4f3dd6023"
+        },
+        {
+          "source_bytes": 1981,
+          "source_mtime_utc": "2026-10-13T15:08:04.885808+00:00",
+          "source_path": "data/engine/wp3/cpu-pytest/mlp3.json",
+          "source_sha256": "55d08c4b42dd958695bba2acff310325ed9431ed53fc6545486d35b7099191e2"
+        },
+        {
+          "source_bytes": 1481,
+          "source_mtime_utc": "2026-10-13T15:08:05.512282+00:00",
+          "source_path": "data/engine/wp3/cpu-pytest/mlp1.json",
+          "source_sha256": "6e562522947c2d0e49a580adea6a7c2b880c59fbe6a91e87f0ab585205cf333b"
+        },
+        {
+          "source_bytes": 1981,
+          "source_mtime_utc": "2026-10-13T15:08:06.642416+00:00",
+          "source_path": "data/engine/wp3/cpu-pytest/label3.json",
+          "source_sha256": "d62aee57175f20955203f44b49d89af939d5560b7d3ee343e3f897a78bc3c5dc"
+        },
+        {
+          "source_bytes": 1972,
+          "source_mtime_utc": "2026-10-13T15:08:27.261705+00:00",
+          "source_path": "data/engine/wp3/cpu-pytest/long-label3.json",
+          "source_sha256": "a07b4c67c38e1ac241ad1a62b05b66fa3c4406edcc5dbad44d72b3b7c995ce3d"
+        },
+        {
+          "source_bytes": 1630,
+          "source_mtime_utc": "2026-10-13T15:08:22.743409+00:00",
+          "source_path": "data/engine/wp3/cpu-pytest/production-real.json",
+          "source_sha256": "054fa42dc727b51079b6eb11cc0fa65d9374bea41fb6397dc1a918fa595356cb"
+        },
+        {
+          "source_bytes": 1948,
+          "source_mtime_utc": "2026-10-13T15:08:24.186934+00:00",
+          "source_path": "data/engine/wp3/cpu-pytest/production-mlp3.json",
+          "source_sha256": "59cbe21a686b9638b5385159e84de6641217cefd6b4098bd1f4a1f64185dc557"
+        },
+        {
+          "source_bytes": 1312,
+          "source_mtime_utc": "2026-10-13T15:08:25.313468+00:00",
+          "source_path": "data/engine/wp3/cpu-pytest/production-mlp1.json",
+          "source_sha256": "7175fd41e6f0b070d09381b08efe872ed3a8e3ddebde0d76d300090edeb8f0dc"
+        },
+        {
+          "source_bytes": 1949,
+          "source_mtime_utc": "2026-10-13T15:08:26.784537+00:00",
+          "source_path": "data/engine/wp3/cpu-pytest/production-label3.json",
+          "source_sha256": "79b52273ed5c5a337744633c08befbae37bac0a29771368520b7a4777a35c393"
+        },
+        {
+          "source_bytes": 704,
+          "source_mtime_utc": "2026-10-11T18:02:20.293561+00:00",
+          "source_path": "data/engine/fixture-models/tiny/mlp3/config.json",
+          "source_sha256": "f7796e6a45e3bd2e9b071280181ada3208a529268c95d7a2b92741d297c0ffc1"
+        },
+        {
+          "source_bytes": 705,
+          "source_mtime_utc": "2026-10-11T18:02:20.447599+00:00",
+          "source_path": "data/engine/fixture-models/tiny/mlp1/config.json",
+          "source_sha256": "92f45d54a45f5865675cb6928b2265a469484dfafc828d23a632959d248ab129"
+        },
+        {
+          "source_bytes": 704,
+          "source_mtime_utc": "2026-10-11T18:02:20.601351+00:00",
+          "source_path": "data/engine/fixture-models/tiny/label3/config.json",
+          "source_sha256": "f7796e6a45e3bd2e9b071280181ada3208a529268c95d7a2b92741d297c0ffc1"
+        },
+        {
+          "source_bytes": 16934,
+          "source_mtime_utc": "2026-10-13T13:14:10.659518+00:00",
+          "source_path": "tah/engine/tests/test_model.py",
+          "source_sha256": "67bbd57d41fc78fb2677ade926a9aafc803d8d3dc643fe046c630db5ba43b833"
+        }
+      ],
+      "top_level_keys_or_columns": [
+        "tolerance",
+        "tiny",
+        "tiny_layers",
+        "long",
+        "probes",
+        "constructor"
+      ]
+    },
     "method.json": {
-      "bytes": 1626,
+      "bytes": 1702,
       "encoding": "declared policy",
       "purpose": "Analysis policy and estimated reproduction runtimes; not measurements.",
-      "sha256": "65057d6eac1b9a67fac54dbaf3728ef456848aea3b6c53fc83a895608af54970",
+      "sha256": "f128a2189c8a118b5c934505a6418174d59a7b3b322ebbad4ab0e48d4ba408a6",
       "source_bytes": 790,
       "source_mtime_utc": "2026-10-13T10:46:31.499002+00:00",
       "source_path": "report/1-engine/data/method.json",
@@ -1408,6 +1550,39 @@
         "graphs",
         "parity",
         "greedy"
+      ]
+    },
+    "port.json": {
+      "bytes": 829,
+      "encoding": "curated JSON",
+      "purpose": "Validation of the engine on a second GPU (L40S): environment, default suite, W-smoke graph/eager identity, overlap identity.",
+      "sha256": "7a1de9f0f507990dad5f33f2e7f5002749b7ecaba99befc9a4c4e901944dd667",
+      "sources": [
+        {
+          "source_bytes": 1485,
+          "source_mtime_utc": "2026-10-13T15:03:24.979427+00:00",
+          "source_path": "data/engine/port/NVIDIA-L40S-24Q/summary.md",
+          "source_sha256": "0090b1e48340521df760c800963c27890649f2da52db4331957a298d795efd20"
+        }
+      ],
+      "top_level_keys_or_columns": [
+        "status",
+        "commit",
+        "date",
+        "device",
+        "vram_gb",
+        "compute_capability",
+        "driver",
+        "cuda",
+        "python",
+        "torch",
+        "transformers",
+        "peft",
+        "flashinfer",
+        "default_suite",
+        "wsmoke",
+        "overlap_identity",
+        "report"
       ]
     },
     "robustness.json": {
@@ -1498,6 +1673,9 @@
     "engine_exploratory": [
       42,
       1234
+    ],
+    "engine_frozen_r1_input": [
+      2024
     ],
     "performance": 0,
     "reference_exploratory": 42
