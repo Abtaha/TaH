@@ -36,10 +36,16 @@ def generate(args):
     manifest_path = destination / 'manifest.json'
     if manifest_path.exists():
         raise ValueError('corpus already exists; preserve it and use another --root')
-    engine = TaHEngine(root, override, max_batch_size=6, prefill_chunk_size=128, kv_capacity=20000)
+    engine = TaHEngine(root, override, max_batch_size=6, prefill_chunk_size=128, kv_capacity=20000,
+                       compile=args.compile, compile_cache_dir=args.compile_cache_dir)
     manifest = dict(checkpoint=args.checkpoint, status='partial', generated_positions=0,
         groups=[], sampling=asdict(SamplingParams(temperature=.6, top_k=20, top_p=.95)),
-        prefill_chunk_size=128, provenance=model_provenance(suite, args.checkpoint))
+        prefill_chunk_size=128, compile=args.compile,
+        compile_cache_dir=engine.compiled_step.cache_dir if engine.compiled_step else None,
+        startup_compile_seconds=engine.compiled_step.compile_seconds if engine.compiled_step else 0.,
+        startup_compile_graphs=engine.compiled_step.compile_graphs if engine.compiled_step else 0,
+        memory_budget=engine.memory_budget,
+        provenance=model_provenance(suite, args.checkpoint))
     historical = args.root / 'tf-real.json'
     previous = json.loads(historical.read_text()) if args.checkpoint == 'real' and historical.exists() else None
     destination.mkdir(parents=True, exist_ok=True)
@@ -209,6 +215,10 @@ def main():
     parser.add_argument('--checkpoint', choices=['real', 'mlp3', 'mlp1', 'label3'], required=True)
     parser.add_argument('--root', type=Path, default=Path('data/engine/wp6'))
     parser.add_argument('--min-generated-positions', type=int, default=8192)
+    parser.add_argument('--compile', action=argparse.BooleanOptionalAction, default=False,
+                        help='use the full-graph TorchInductor decode path')
+    parser.add_argument('--compile-cache-dir', type=Path,
+                        help='TorchInductor disk cache (default: TORCHINDUCTOR_CACHE_DIR or ~/.cache/torch/inductor)')
     args = parser.parse_args()
     torch.set_num_threads(2)
     start = time.perf_counter()

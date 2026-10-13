@@ -21,6 +21,11 @@ def engine(tmp_path, **kwargs):
                      prefill_chunk_size=3, eos_token_id=None, **kwargs)
 
 
+def test_compile_requires_cuda_before_model_load():
+    with pytest.raises(ValueError, match='compile=True requires a CUDA device'):
+        TaHEngine('unused-checkpoint', device='cpu', compile=True)
+
+
 @pytest.mark.parametrize('max_iter,label', [(1, True), (3, True), (3, False), (5, False)])
 def test_generation_reference_and_counts(tmp_path, max_iter, label):
     oracle = reference(tmp_path, max_iter=max_iter, label=label)
@@ -220,3 +225,22 @@ def test_profile_counts_physical_work_without_annotation_or_cpu_duplicates():
         dict(cat='kernel', name='outside decode', ts=13, dur=4),
     ]
     assert trace_profile_totals(trace) == dict(steps=1, wall_us=10, kernel_us=2, copy_us=2, activities=3)
+
+
+def test_graph_bucket_selection_validation():
+    from tah.engine.graphs import batch_sizes
+    assert batch_sizes(4, None) == (1, 2, 3, 4)
+    assert batch_sizes(4, [4, 1, 4]) == (1, 4)
+    assert batch_sizes(4, []) == ()
+    for bad in ([0], [5], [True], [1.5]):
+        with pytest.raises(ValueError, match='graph_batch_sizes'):
+            batch_sizes(4, bad)
+
+
+def test_cuda_graph_copy_kernel_is_physical_kernel_not_dma():
+    from tah.engine.tests.engine_check import cuda_transfer_activity
+    assert not cuda_transfer_activity('memcpy32_post')
+    assert not cuda_transfer_activity('void copy_kernel<float>(...)')
+    assert cuda_transfer_activity('Memcpy HtoD (Pinned -> Device)')
+    assert cuda_transfer_activity('Memcpy DtoD (Device -> Device)')
+    assert cuda_transfer_activity('Memset (Device)')

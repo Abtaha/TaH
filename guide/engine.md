@@ -1,21 +1,28 @@
 # TaH inference engine
 
-`TaHEngine` provides experimental eager generation for local TaH v1 checkpoints on one
+`TaHEngine` provides experimental generation for local TaH v1 checkpoints on one
 CUDA GPU. It runs all prompt passes in bounded chunks, mixes token depths in
 decode, and admits queued requests as completed requests free capacity. CUDA
-graph generation and the evaluation CLI's `tah_engine` backend are still pending;
+graph decode is enabled by default. The evaluation CLI's `tah_engine` backend is still pending;
 the evaluation CLI accepts `tah`, `hf`, and `sglang`.
 
 Generated-sequence reference parity, greedy sanity checks and production swap/
 long-context robustness checks pass on the RTX 3090. Eager W-perf with 64 resident
 requests measures 962.81 generated tokens/s versus 78.26 for the reference baseline.
 End-to-end accuracy evaluation and L40S validation remain later validation steps.
+Graph decode at the same resident cap measures 1,353.18 tokens/s (1.41 times
+eager), with exact W-smoke and forced-swap tokens/decisions/pass counts. The
+16,384-token stress completes within the default 8 GiB host swap budget,
+peaking at 6.36 GiB. Capturing sizes 1–64 takes 22.68 seconds including warmup
+and both sizing/final rounds; the measured initial GPU memory delta is 1,522
+MiB, including 106 MiB of private graph storage. All of it is accounted for
+when sizing KV. These measurements are from the RTX 3090.
 
 Use [installation](installation.md) for the `engine` extra and prerequisites,
 and [evaluation](evaluation.md) for the reference backend. TaH2's bundled
 `tah2/minisgl/` is a separate engine.
 
-## Generate with the eager engine
+## Generate with the engine
 
 Run from the repository root in the frozen environment:
 
@@ -56,6 +63,9 @@ argmax. See the sampling section below for filtering and cutoff rules. A seed
 is a signed 64-bit integer; its draw counter belongs to the request and survives
 swapping. Repeat a call with the same seeds and batch composition for identical
 outputs.
+For graph/eager comparisons, use the same explicit KV capacity and request
+composition, or run the smoke tool below, which reuses one pool. Auto-sizing
+accounts for graph memory and can change when admission or swapping occurs.
 
 Each `Result` has `request_id` (input index), `token_ids`, `text`,
 `prompt_pass_counts`, `generated_pass_counts`, `finish_reason` (`eos` or
@@ -82,7 +92,10 @@ Constructor options (keyword-only):
 | `seed` | 0 | Base seed for plain requests; each input adds its index. |
 | `eos_token_id` | `"tokenizer"` | Read tokenizer EOS; set an integer explicitly or `None` to disable EOS stopping. |
 | `sampling_topk` | 128 | Bounded shortlist limit; sampling with k=0 or larger k uses the general full-vocabulary path. |
-| `compile` | `False` | Eager mode; `True` currently raises an actionable error. |
+| `compile` | `False` | Fuse the decode step with TorchInductor. Requires CUDA and keeps exact-B graph buckets. Independent of CUDA graph replay. |
+| `compile_cache_dir` | `None` | Persistent TorchInductor cache path. `None` uses `TORCHINDUCTOR_CACHE_DIR`, or `~/.cache/torch/inductor` when unset. |
+| `cuda_graphs` | `True` | Capture bounded sampling and greedy decode at startup on CUDA. `False` runs eager decode for debugging; CPU always runs eager. |
+| `graph_batch_sizes` | `None` | Capture every integer size from 1 to `max_batch_size`. A sequence such as `[1, 8, 16, 32, 64]` restricts captures; other sizes run eager. An empty sequence disables capture. Values must be integers in the resident range; duplicates are removed. |
 | `profile_steps` | 0 | Collect CUDA stream-event and host timings for the first specified decode steps. Stream events include launch gaps; use the profiler tool below for kernel execution time. |
 
 `config_override` follows the checkpoint loader's reference-compatible TaH
@@ -93,6 +106,49 @@ state, model/sampling intermediates, bounded swap scratch, and allocator margin.
 `engine.memory_budget` exposes the measured free bytes, reservations and resulting
 capacity. Memory scales with real request tokens; prefill does not pad short
 prompts to the longest request.
+
+Graphs use exact batch sizes, without dummy rows or dummy KV entries during
+generation. This keeps the same numerical shapes as eager. General sampling
+(`top_k=0` or above `sampling_topk`) uses the general sampler path. Parameters and RNG seeds/
+counters may change between replays; graph capture never consumes a request's
+RNG. One capture handles both bounded sampling and greedy rows; greedy uses
+argmax and advances no counter. RoPE frequencies, attention descriptors/plans and slot growth are prepared
+outside capture, including dynamic/LongRoPE changes. Only the device step is
+captured. Graphs share transient storage and run sequentially; the status is
+consumed before another replay. Prefill and swap remain eager.
+
+With `compile=True`, a dynamic-shape `torch.compile(fullgraph=True)` decode
+function fuses transformer projections and LoRA deltas, RMSNorm, RoPE, MLP
+activations, decider, bf16 logit accumulation, input-embedding mix and sampling.
+Paged FlashInfer attention is an opaque custom operator inside that graph; there
+are no Dynamo graph breaks. The compiled function accepts dynamic row counts
+while CUDA graph replay remains exact-B. Prefill stays eager. `compile=False`
+runs the same decode path eagerly. Compile remains off by default: on the RTX
+3090, the selected exact-B profile reduced mean physical kernel time from the
+WP7 29.43 ms to 25.79 ms (12.4%), while W-perf measured 1325.33 tok/s versus
+WP7 1353.18 tok/s (2.1% slower). The selected capture set left most decode
+sizes on the compiled eager fallback; capturing all 64 sizes had not completed
+startup after five minutes. Compilation changes bf16 rounding, so compare
+compiled output under the corpus-matched generated G-TF rules, not to
+compile-disabled logits. `engine.last_run.compile` and each capture report
+compile wall time and the number of compiled graphs.
+
+Startup measures captures using a small temporary KV pool, destroys them, sizes
+the real KV pool from a fresh free-memory reading, then captures against its
+final addresses. Graph-private storage and releasable executable memory are
+reserved in KV sizing; CUDA allocations retained after probe destruction are already included
+in the free-memory reading. `memory_budget.graph_probe` and `.graphs` report
+warmup/capture seconds, live/reserved private bytes and device memory deltas;
+`total_capture_seconds` includes both capture rounds. Initialization is excluded
+from generation throughput. A capture exceeding its measured reservation plus
+allocator margin raises `KVCapacityError`; lower `memory_fraction` or disable
+graphs. Static unsplit attention plans use compact integer workspaces sized for
+their real row count, preserving KV capacity. Dependencies and supported CUDA
+architectures are unchanged.
+The compile cache persists at `compile_cache_dir` (or the TorchInductor default)
+across engine instances and process runs. Compilation occurs during startup graph
+warmup when CUDA graphs are enabled; with graph capture disabled, the first
+decode call compiles lazily.
 
 Admission reserves the entire prompt's worst-case passes and the next pass of
 every running row before execution. If growth runs out of slots, the newest
@@ -105,7 +161,11 @@ clearly. Slot and swap ownership are released on success and on exceptions.
 
 `engine.last_run` reports wall seconds (excluding engine construction), generated
 tokens, tokens/s, decode steps, swap counts, blocked-admission steps, peak live
-host swap bytes, and optional per-step timing samples. Each CUDA decode step
+host swap bytes, `graph_steps`/`eager_steps`, and optional per-step timing samples.
+`time_seconds` and `time_share` divide generation wall time into decode, prefill,
+swap issue work and remaining host scheduling/callback work. Swap transfers are
+asynchronous; their completion can contribute to the following decode/prefill
+scope. These are wall scopes, not additive GPU utilization. Each CUDA decode step
 uses one status transfer to the host. Exact batch-size buckets keep fixed buffer
 shapes and a reusable unsplit FlashInfer plan; no per-step context-length scan
 runs in Python. Low batch sizes can leave the GPU underutilized in eager mode.
@@ -113,14 +173,20 @@ runs in Python. Low batch sizes can leave the GPU underutilized in eager mode.
 ## Engine validation and performance tools
 
 Run each checkpoint/gate as a separate process, with a 28-minute limit. These
-commands require the completed production fixtures and local checkpoint paths:
+fixture parity commands require completed production fixtures. Smoke and workload
+checks use the local checkpoint and Math500; they can load the dataset on a fresh
+machine without archived reference results:
 
 ```bash
 source .venv-tah/bin/activate
 CUDA_VISIBLE_DEVICES=0 python -m pytest -q tah/engine/tests/test_engine_gpu.py
+CUDA_VISIBLE_DEVICES=0 timeout 28m python -m tah.engine.tests.engine_check \
+  --gate smoke --batch-size 16 --cuda-graphs --output data/engine/checks/wsmoke-graph.json
+CUDA_VISIBLE_DEVICES=0 timeout 28m python -m tah.engine.tests.engine_check \
+  --gate smoke --batch-size 16 --cuda-graphs --compile --output data/engine/checks/wsmoke-compiled.json
 for checkpoint in real mlp3 mlp1 label3; do
   CUDA_VISIBLE_DEVICES=0 timeout 28m python -m tah.engine.tests.engine_check \
-    --gate gen --checkpoint "$checkpoint" --output "data/engine/wp6/gen-$checkpoint.json"
+    --gate gen --checkpoint "$checkpoint" --output "data/engine/checks/gen-$checkpoint.json"
   CUDA_VISIBLE_DEVICES=0 timeout 28m python -m tah.engine.tests.generated_gtf \
     --phase generate --checkpoint "$checkpoint"
   CUDA_VISIBLE_DEVICES=0 timeout 28m python -m tah.engine.tests.generated_gtf \
@@ -129,19 +195,19 @@ for checkpoint in real mlp3 mlp1 label3; do
     --phase compare --checkpoint "$checkpoint"
 done
 CUDA_VISIBLE_DEVICES=0 timeout 28m python -m tah.engine.tests.engine_check \
-  --gate perf --batch-size 64 --output data/engine/wp6/wperf.json
+  --gate perf --batch-size 64 --output data/engine/checks/wperf.json
 CUDA_VISIBLE_DEVICES=0 timeout 28m python -m tah.engine.tests.engine_check \
-  --gate robust --batch-size 64 --max-new-tokens 16384 --output data/engine/wp6/robust.json
+  --gate robust --batch-size 64 --max-new-tokens 16384 --output data/engine/checks/robust.json
 CUDA_VISIBLE_DEVICES=0 timeout 28m python -m tah.engine.tests.engine_check \
-  --gate long-prompt --max-new-tokens 8 --output data/engine/wp6/long-prompt.json
+  --gate long-prompt --batch-size 64 --max-new-tokens 8 --output data/engine/checks/long-prompt.json
 CUDA_VISIBLE_DEVICES=0 python -m tah.engine.tests.engine_check \
-  --gate swap --output data/engine/wp6/forced-swap.json
+  --gate swap --output data/engine/checks/forced-swap.json
 CUDA_VISIBLE_DEVICES=0 python -m tah.engine.tests.engine_check \
-  --gate profile --batch-size 64 --output data/engine/wp6/profile-b64.json
+  --gate profile --batch-size 64 --output data/engine/checks/profile-b64.json
 ```
 
-Tool options: `--gate` is required (`gen`, `tf`, `perf`, `robust`, `long-prompt`,
-`swap`, `profile`); `--output` is the required JSON destination; `--checkpoint` chooses
+Tool options: `--gate` is required (`gen`, `tf`, `smoke`, `perf`, `robust`, `long-prompt`,
+`swap`, `profile`, `phase-profile`, `overlap`); `--output` is the required JSON destination; `--checkpoint` chooses
 `real` (default), `mlp3`, `mlp1`, or `label3` for parity; `--batch-size` defaults
 to 128 for workload/profile runs; `--max-new-tokens` defaults to 4096 for
 workloads; `--start`/`--end` select the expanded 128-prompt workload range
@@ -186,12 +252,26 @@ increasing padded-column boundaries from 0 to the padded input width. Optional
 positions when replaying generated batches. Invalid values raise `ValueError`;
 default fixture capture behavior is unchanged.
 
-`--gate swap` checks production-weight output/pass-count identity across a
+`--cuda-graphs` enables graphs (default); `--no-cuda-graphs` runs eager decode.
+`--compile` enables full-graph TorchInductor decode; `--no-compile` is the
+default. `--compile-cache-dir` selects its persistent cache directory.
+`--model-path` defaults to `models/TaH-plus-1.7B` for workload, smoke, swap and
+profile checks; fixture parity uses its recorded checkpoint paths.
+`--gate smoke` runs W-smoke (Math500 `[0,16)`, repeat 1, cap 1024), comparing
+eager and graph at the same capacity, seeds and batch composition. It requires
+exact tokens, finish reasons, prompt/generated pass counts and every decode
+decision. Its report includes decision row count/hash, both runs, captures and
+KV cleanup. It requires the real checkpoint and dataset, and works without the
+local fixture archives. Prefill uses the same eager path in both modes.
+
+`--gate swap` checks production-weight eager/graph output/pass-count/decision identity across a
 forced mid-generation swap and immediate restoration at unchanged batch
 composition, then audits KV and host swap cleanup.
 
 The workload tool reconstructs Math500 prompts from the saved reference
 W-perf samples and tokenizer's chat template, then repeats each prompt twice.
+On a fresh machine without those samples it loads Math500 through the evaluation
+dataset loader; all 64 question strings match the saved baseline.
 Construction and a warmup run are excluded from measured wall time. A report
 contains request results, memory reservations/peaks, KV audit, live host swap
 bytes, tokens/s and the reference 78.26 tokens/s baseline. Split workload ranges
@@ -204,6 +284,30 @@ wall times. The profiler records the first eleven decode steps after actual
 model prefill, with admission headroom set to zero for this diagnostic; observed
 batch sizes are recorded in the report. Prefill is excluded from the trace. The profiled wall-minus-device residual includes Python/launch gaps
 and profiler overhead, with overlap caveats.
+Profile mode also saves `.timings.json` beside the report before final trace
+verification: unprofiled/profiled event samples, raw CUDA totals/counts, capture
+memory and run accounting. This preserves the measurement if report validation
+fails. A kernel named `memcpy32_post` counts as kernel execution; DMA copies and
+memsets are classified separately and checked against trace categories.
+When graph mode's estimated remaining host/launch gap exceeds 2 ms, the profile
+also measures preparation of two candidate next-step host descriptors while the
+current GPU step runs. It reports host draft time and pending-GPU event counts,
+and checks exact keep/token/raw-logit/probability status on identical prepared
+step inputs, counters and KV layout. The diagnostic replays the prepared step
+twice with restored step inputs, then consumes the second replay's state; its
+extra replay/wait is excluded from normal performance samples. Drafts are discarded: actual next
+depths, EOS/removal, admission and table growth depend on the current status.
+This diagnostic enables no runtime lookahead.
+`--gate overlap` runs this diagnostic alone with `--batch-size` and
+`--profile-context` (2048 by default; 0 uses the original prompts). It requires
+`--cuda-graphs`; `--no-cuda-graphs` raises an error.
+
+`--gate phase-profile` profiles a short four-request run and forced swap, using
+the real workload prompts and a 48-token cap. It saves a `.trace.json` beside its
+report, separates prefill/admission, swap-out, restore and decode scopes, and
+reports equivalent unprofiled host timing and in-scope physical CUDA kernel/copy
+time. It excludes graph startup; asynchronous swap work can finish after its
+CPU scope, so its residual is not a GPU idle measurement.
 
 ## Reference parity fixtures
 

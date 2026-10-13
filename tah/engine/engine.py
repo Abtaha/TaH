@@ -1,4 +1,4 @@
-"""Eager TaH generation: bounded prefill, mixed-depth steps and swap scheduling.
+"""TaH generation: bounded prefill, graphed mixed-depth steps and swap scheduling.
 
 DecodeBucket and step buffers have fixed addresses/shapes for each exact B.
 Admission, slot allocation, descriptor staging and RoPE frequency planning happen
@@ -12,12 +12,14 @@ import time
 
 import torch
 
-from .attention import AttentionRow, DecodeBucket
+from .attention import AttentionRow, DecodeBucket, static_plan_integer_bytes
 from .kv_cache import KVCapacityError, SlotPool
 from .model import EagerTaHModel
 from .sampling import GraphSampler, RequestRNG, SamplingParams
 from .scheduler import HostSwap, Request, Result, State
 from .tensors import upload
+from .graphs import DecodeGraphs, batch_sizes
+from .compiled import CompiledDecodeStep, register_attention_plan
 
 
 class StepBucket:
@@ -36,10 +38,23 @@ class StepBucket:
         self.params = None
         self.sampler = None
         self.sampling_buckets = {}
+        self.rotary = tuple(torch.empty(1, size, engine.model.config['head_dim'],
+            device=engine.device, dtype=engine.model.dtype) for _ in range(2))
+        self.attention_key = register_attention_plan(self.attention) if engine.compile_enabled else None
+
+    def set_rotary(self, rotary):
+        for target, source in zip(self.rotary, rotary):
+            target.copy_(source)
 
     def sampling(self, engine, params):
         # Only the immutable sampling path determines a bucket specialization.
         key = (all(p.greedy for p in params), all(p.greedy or 1 <= p.top_k <= engine.sampling_topk for p in params))
+        if engine.cuda_graphs and self.size in engine.graph_batch_sizes and key[1]:
+            # The bounded sampler already handles greedy rows with argmax and
+            # zero RNG advance. One capture per B avoids duplicating every
+            # model node/executable for a separate greedy specialization.
+            key = (False, True)
+        self.sampling_key = key
         if key not in self.sampling_buckets:
             sampler = GraphSampler(engine.model.config['vocab_size'],
                 max_top_k=engine.sampling_topk if key[1] else None, greedy_only=key[0])
@@ -52,6 +67,8 @@ class StepBucket:
     @torch.inference_mode()
     def run(self, engine, rotary):
         """The device-only step boundary WP7 can capture without rescheduling."""
+        if engine.compile_enabled:
+            return engine.compiled_step.run(self, engine, rotary)
         model = engine.model
         output = model.forward_cached(self.embeddings, self.positions, self.depths,
                                       self.slots, engine.pool, self.attention, rotary=rotary)
@@ -82,9 +99,12 @@ class TaHEngine:
                  kv_capacity=None, admission_headroom=.1, host_swap_bytes=8 * 1024**3,
                  swap_chunk_entries=256, max_new_tokens=1024, seed=0,
                  eos_token_id='tokenizer', sampling_topk=128, compile=False,
-                 profile_steps=0):
-        if compile:
-            raise ValueError('compile=True is not available in the eager engine; use compile=False')
+                 profile_steps=0, cuda_graphs=True, graph_batch_sizes=None,
+                 compile_cache_dir=None):
+        if not isinstance(compile, bool):
+            raise ValueError('compile must be boolean')
+        if compile and torch.device(device).type != 'cuda':
+            raise ValueError('compile=True requires a CUDA device; use compile=False for CPU development')
         for name, value in [('max_batch_size', max_batch_size), ('prefill_chunk_size', prefill_chunk_size),
                             ('swap_chunk_entries', swap_chunk_entries), ('sampling_topk', sampling_topk)]:
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -93,14 +113,21 @@ class TaHEngine:
             raise ValueError('memory_fraction must be in (0,1], admission_headroom in [0,1)')
         if max_new_tokens < 0 or not isinstance(max_new_tokens, int) or profile_steps < 0:
             raise ValueError('max_new_tokens and profile_steps must be nonnegative integers')
+        if not isinstance(cuda_graphs, bool):
+            raise ValueError('cuda_graphs must be boolean')
+        self.graph_batch_sizes = batch_sizes(max_batch_size, graph_batch_sizes)
         self.model = EagerTaHModel.from_pretrained(model_path, config_override, device=device)
         self.device = self.model.device
-        self.decider = self.model.eval_iter_decider or self.model.iter_decider
-        self.decider_indices = upload(self.decider.selected_layers(len(self.model.model.layers)), self.device) if hasattr(self.decider, 'selected_layers') else None
-        self.context_limit = self.model.config['max_position_embeddings']
+        self.compile_enabled = compile
+        self.cuda_graphs = cuda_graphs and self.device.type == 'cuda' and bool(self.graph_batch_sizes)
+        self.graphs = DecodeGraphs()
         self.max_batch_size, self.prefill_chunk_size = max_batch_size, prefill_chunk_size
         self.max_new_tokens, self.seed, self.sampling_topk = max_new_tokens, seed, sampling_topk
         self.admission_headroom, self.profile_steps = admission_headroom, profile_steps
+        self.decider = self.model.eval_iter_decider or self.model.iter_decider
+        self.decider_indices = upload(self.decider.selected_layers(len(self.model.model.layers)), self.device) if hasattr(self.decider, 'selected_layers') else None
+        self.compiled_step = CompiledDecodeStep(self, compile_cache_dir) if compile else None
+        self.context_limit = self.model.config['max_position_embeddings']
         self.tokenizer = None
         root = Path(model_path)
         if (root / 'tokenizer.json').exists():
@@ -121,13 +148,37 @@ class TaHEngine:
         slot_bytes = 4 * n * cfg['num_key_value_heads'] * cfg['head_dim']
         # Every future exact-B attention object's private FlashInfer integer
         # workspace is budgeted; float scratch and ragged staging are shared.
+        static_integer_bytes = sum(static_plan_integer_bytes(size) for size in range(1, b + 1))
         reserves = dict(flashinfer_float=2 * 128 * 1024**2 if self.device.type == 'cuda' else 0,
-            flashinfer_integer=(b + 1) * 8 * 1024**2 if self.device.type == 'cuda' else 0,
+            flashinfer_integer=8 * 1024**2 + static_integer_bytes if self.device.type == 'cuda' else 0,
             state_and_step=4 * b * (v + h) + 256 * b,
             model_transients=max(b, chunk) * (8 * v + 2 * (n + 16) * h + 12 * inter + 4 * min(v, self.model.input_topk) * h),
             general_sampler=80 * b * v,
             swap_scratch=min(swap_chunk_entries, kv_capacity or swap_chunk_entries) * slot_bytes,
             allocator_margin=512 * 1024**2 if self.device.type == 'cuda' else 0)
+        self._busy = False
+        self._observer = None
+        self._step_hook = None
+        self.last_run = {}
+        probe = None
+        if self.cuda_graphs:
+            # Measure the same model/step shapes with a tiny scratch KV pool.
+            # Destroy these graphs before allocating the real KV pool: captured
+            # pointers must refer to its final, immovable storage.
+            self._allocate_runtime(b, host_swap_bytes, swap_chunk_entries)
+            self.graphs.capture(self)
+            probe = self.graphs.info.copy()
+            before_close = torch.cuda.mem_get_info(self.device)[0]
+            self.graphs.close()
+            torch.cuda.synchronize(self.device)
+            torch.cuda.empty_cache()
+            probe['released_device_bytes'] = max(0, torch.cuda.mem_get_info(self.device)[0] - before_close)
+            self._release_runtime()
+            self.graphs = DecodeGraphs()
+            # Driver/module allocations retained after reset are already
+            # excluded by the fresh free-memory reading below. Reserve only
+            # storage/executables that will be allocated again for final graphs.
+            reserves['cuda_graphs'] = max(probe['released_device_bytes'], probe['private_reserved_bytes'])
         free = None
         if self.device.type == 'cuda':
             torch.cuda.synchronize(self.device)
@@ -148,7 +199,34 @@ class TaHEngine:
             raise KVCapacityError('KV budget is too small; decrease max_batch_size or reserve less workspace')
         self.memory_budget = dict(measured_free_bytes=free, memory_fraction=memory_fraction,
             reservations=reserves, kv_capacity=kv_capacity, kv_bytes=kv_capacity * slot_bytes,
-            metadata_budget_bytes=kv_capacity * 44, host_flashinfer_workspace_bytes=b * 8 * 1024**2 if self.device.type == 'cuda' else 0)
+            metadata_budget_bytes=kv_capacity * 44, host_flashinfer_workspace_bytes=static_integer_bytes if self.device.type == 'cuda' else 0)
+        self._allocate_runtime(kv_capacity, host_swap_bytes, swap_chunk_entries)
+        if self.cuda_graphs:
+            self.graphs.capture(self)
+            self.memory_budget['graph_probe'] = probe
+            self.memory_budget['graphs'] = self.graphs.info.copy()
+            self.memory_budget['total_capture_seconds'] = probe['capture_seconds'] + self.graphs.info['capture_seconds']
+            overhead = max(self.graphs.info['device_overhead_bytes'], self.graphs.info['private_reserved_bytes'])
+            if overhead > reserves['cuda_graphs'] + reserves['allocator_margin']:
+                raise KVCapacityError('graph capture exceeded its measured memory reservation; '
+                                      'reduce memory_fraction or use cuda_graphs=False')
+        if self.compiled_step is not None:
+            self.memory_budget['compile'] = dict(enabled=True,
+                cache_dir=self.compiled_step.cache_dir,
+                seconds=self.compiled_step.compile_seconds,
+                graphs=self.compiled_step.compile_graphs)
+
+    def _release_runtime(self):
+        self.buckets.clear()
+        for name in self._runtime_attributes:
+            setattr(self, name, None)
+        torch.cuda.synchronize(self.device)
+        torch.cuda.empty_cache()
+
+    def _allocate_runtime(self, kv_capacity, host_swap_bytes, swap_chunk_entries):
+        before = set(self.__dict__)
+        cfg, b, n = self.model.config, self.max_batch_size, self.model.config['num_hidden_layers']
+        v, h = cfg['vocab_size'], cfg['hidden_size']
         self.pool = SlotPool(kv_capacity, n, cfg['num_key_value_heads'], cfg['head_dim'],
                              self.model.max_iter, device=self.device)
         self.swap = HostSwap(self.pool, host_swap_bytes, swap_chunk_entries)
@@ -174,10 +252,8 @@ class TaHEngine:
             output=empty(b, cfg['num_attention_heads'], cfg['head_dim'], dtype=self.model.dtype),
             descriptors=empty(b, 3 * self.model.max_iter + 4))
         self.buckets = {}
-        self._busy = False
-        self._observer = None  # observational test tooling, no runtime oracle imports
-        self._step_hook = None  # forced-swap test injection, outside device step
-        self.last_run = {}
+        if not hasattr(self, '_runtime_attributes'):
+            self._runtime_attributes = set(self.__dict__) - before
 
     def _bucket(self, size):
         if size not in self.buckets:
@@ -267,12 +343,14 @@ class TaHEngine:
             callback(result)
 
     def _swap_out(self, state, running, swapped, free_rows):
+        started = time.perf_counter()
         self.swap.out(state, self.device_state)
         running.remove(state)
         free_rows.append(state.row)
         state.row = -1
         swapped.append(state)
         self.last_run['swap_outs'] += 1
+        self.last_run['time_seconds']['swap'] += time.perf_counter() - started
 
     def _restore(self, running, swapped, free_rows):
         # FIFO, and reserve growth for every resident row before restoration.
@@ -282,7 +360,9 @@ class TaHEngine:
             if needed > self.pool.free_slots:
                 break
             state.row = free_rows.pop()
+            started = time.perf_counter()
             self.swap.restore(state, self.device_state, self.context_limit)
+            self.last_run['time_seconds']['swap'] += time.perf_counter() - started
             swapped.popleft()
             running.append(state)
             running.sort(key=lambda s: s.index)
@@ -317,7 +397,7 @@ class TaHEngine:
         planned = time.perf_counter()
         if events:
             events[1].record()
-        status = bucket.run(self, rotary)
+        status = self.graphs.run(bucket, self, rotary)
         if self._observer is not None:
             self._observer.decode(running, bucket, status)
         if events:
@@ -353,7 +433,13 @@ class TaHEngine:
         free_rows = list(range(self.max_batch_size - 1, -1, -1))
         results = [None] * len(states)
         started = time.perf_counter()
-        self.last_run = dict(steps=0, swap_outs=0, swap_ins=0, blocked_admission_steps=0, profile=[])
+        self.last_run = dict(steps=0, graph_steps=0, eager_steps=0, swap_outs=0, swap_ins=0,
+                             blocked_admission_steps=0, profile=[],
+                             compile=dict(enabled=self.compile_enabled,
+                                cache_dir=self.compiled_step.cache_dir if self.compiled_step else None,
+                                seconds=self.compiled_step.compile_seconds if self.compiled_step else 0.,
+                                graphs=self.compiled_step.compile_graphs if self.compiled_step else 0),
+                             time_seconds=dict(decode=0., prefill=0., swap=0., host=0.))
         try:
             while waiting or swapped or running:
                 self._restore(running, swapped, free_rows)
@@ -367,7 +453,9 @@ class TaHEngine:
                         break
                     waiting.popleft()
                     state.row = free_rows.pop()
+                    phase_started = time.perf_counter()
                     reason = self._prefill(state)
+                    self.last_run['time_seconds']['prefill'] += time.perf_counter() - phase_started
                     if reason:
                         self._finish(state, reason, results, on_result)
                         free_rows.append(state.row)
@@ -388,7 +476,9 @@ class TaHEngine:
                     if len(running) == 1:
                         raise KVCapacityError('request cannot fit KV pool alone at its next pass')
                     self._swap_out(victim, running, swapped, free_rows)
+                phase_started = time.perf_counter()
                 status = self._decode(running)
+                self.last_run['time_seconds']['decode'] += time.perf_counter() - phase_started
                 for state, (keep, token, raw, probability) in zip(running.copy(), status):
                     if keep:
                         state.depth += 1
@@ -404,7 +494,13 @@ class TaHEngine:
             self.last_run.update(wall_seconds=time.perf_counter() - started,
                 generated_tokens=sum(len(r.token_ids) for r in results),
                 host_swap_peak_bytes=self.swap.peak_bytes)
+            if self.compiled_step is not None:
+                self.last_run['compile'] = dict(enabled=True, cache_dir=self.compiled_step.cache_dir,
+                    seconds=self.compiled_step.compile_seconds, graphs=self.compiled_step.compile_graphs)
             self.last_run['tokens_per_second'] = self.last_run['generated_tokens'] / max(self.last_run['wall_seconds'], 1e-9)
+            phases = self.last_run['time_seconds']
+            phases['host'] = self.last_run['wall_seconds'] - sum(phases.values())
+            self.last_run['time_share'] = {k: v / max(self.last_run['wall_seconds'], 1e-9) for k, v in phases.items()}
             return results
         finally:
             for state in states:

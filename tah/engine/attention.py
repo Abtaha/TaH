@@ -17,6 +17,12 @@ class AttentionRow:
     depth: int  # 1-based pass number
 
 
+def static_plan_integer_bytes(batch_size):
+    # FlashInfer 0.2.5 unsplit DecodePlan: int32 request/tile arrays (B),
+    # output indptr (B+1), chunk scalar, each with <=16-byte alignment.
+    return max(4096, ((12 * batch_size + 68 + 255) // 256) * 256)
+
+
 def validate_rows(pool, rows):
     if not rows:
         raise ValueError("attention requires at least one row")
@@ -78,6 +84,8 @@ class DecodeBucket:
                 paged_kv_indices_buffer=self.indices,
                 paged_kv_last_page_len_buffer=self.last)
             if static_plan:
+                self.wrapper.reset_workspace_buffer(self.workspace,
+                    torch.empty(static_plan_integer_bytes(batch_size), dtype=torch.uint8, device=device))
                 # A one-page non-graph plan has no split-KV tiles: one CTA per
                 # request/head reads the LIVE indptr. Its launch shape depends
                 # only on B, never context lengths. plan() itself stays outside

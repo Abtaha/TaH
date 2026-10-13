@@ -1,9 +1,10 @@
-"""Bounded eager engine gates and workload/profile reports.
+"""Bounded engine gates and workload/profile reports.
 
 Run one checkpoint/gate per process. Production parity uses WP2's immutable
 self-noise, with runtime/reference/checkpoint hashes recorded in every report.
 """
 import argparse
+from bisect import bisect_right
 from dataclasses import asdict
 import gc
 import hashlib
@@ -26,6 +27,22 @@ from tah.engine.generate_fixtures import load_reference
 
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def parse_graph_batch_sizes(value):
+    if not value.strip():
+        return []
+    try:
+        return [int(part.strip()) for part in value.split(',')]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError('graph batch sizes must be comma-separated integers') from exc
+
+
+def cuda_transfer_activity(name):
+    # CUDA graphs can launch a real kernel named memcpy32_post. Substring
+    # matching misclassifies it as a DMA copy; Kineto DMA names have a word
+    # prefix ("Memcpy HtoD ...", "Memset (Device) ...").
+    return name.split(' ', 1)[0].lower() in ('memcpy', 'memset')
 
 
 def trace_profile_totals(trace):
@@ -108,7 +125,10 @@ def fixture_setup(name):
 
 def parity(args):
     suite, root, override, noise, records, prompts, eval_config = fixture_setup(args.checkpoint)
-    engine = TaHEngine(root, override, max_batch_size=6, prefill_chunk_size=128, kv_capacity=20000)
+    engine = TaHEngine(root, override, max_batch_size=6, prefill_chunk_size=128, kv_capacity=20000,
+                      cuda_graphs=args.cuda_graphs, compile=args.compile,
+                      compile_cache_dir=args.compile_cache_dir,
+                      graph_batch_sizes=args.graph_batch_sizes)
     observer = Observer(engine) if args.gate == 'tf' else None
     engine._observer = observer
     params = SamplingParams(temperature=.6, top_k=20, top_p=.95) if args.gate == 'tf' else SamplingParams(temperature=0)
@@ -167,29 +187,35 @@ def parity(args):
     return report
 
 
-def workload_prompts():
+def workload_prompts(model_path='models/TaH-plus-1.7B', repeat=2):
     baseline = Path('data/engine/wperf_bs16/math500_tah/20261011_155619/TASK_0_64/samples.jsonl')
-    rows = [json.loads(line) for line in baseline.read_text().splitlines()]
-    questions = {}
-    for row in rows:
-        questions[row['id']] = row['problem']
+    if baseline.exists():
+        rows = [json.loads(line) for line in baseline.read_text().splitlines()]
+        questions = {row['id']: row['problem'] for row in rows}
+    else:
+        from tah.evaluate.datasets import load_combined_dataset
+        rows, _ = load_combined_dataset('math500')
+        questions = {row['id']: row['question'] for row in rows[:64]}
     assert len(questions) == 64
     # Exactly the reference evaluation chat template, rendered with its saved
     # tokenizer only in offline workload preparation (not engine runtime).
     from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained('models/TaH-plus-1.7B')
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     return [tokenizer.apply_chat_template([dict(role='user', content=questions[f'math500_{i}'])],
                                         tokenize=True, add_generation_prompt=True)
-            for i in range(64) for _ in range(2)]
+            for i in range(64) for _ in range(repeat)]
 
 
 def workload(args):
-    prompts = workload_prompts()[args.start:args.end]
+    prompts = workload_prompts(args.model_path)[args.start:args.end]
     if args.gate == 'long-prompt':
         prompts = [(prompts[0] * (16384 // len(prompts[0]) + 1))[:16384]] + prompts[1:33]
     override = yaml.safe_load(Path('script/tah/recipes/qwen3_1.7/eval_tah.yaml').read_text())
-    engine = TaHEngine('models/TaH-plus-1.7B', override, max_batch_size=args.batch_size,
-                      prefill_chunk_size=128, profile_steps=0, memory_fraction=args.memory_fraction)
+    engine = TaHEngine(args.model_path, override, max_batch_size=args.batch_size,
+                      prefill_chunk_size=128, profile_steps=0, memory_fraction=args.memory_fraction,
+                      cuda_graphs=args.cuda_graphs, compile=args.compile,
+                      compile_cache_dir=args.compile_cache_dir,
+                      graph_batch_sizes=args.graph_batch_sizes)
     params = SamplingParams(temperature=.6, top_k=20, top_p=.95)
     # Load/warmup excluded; exercise actual maximum-B linear and bounded sampler.
     engine.generate([Request(prompts[i % len(prompts)], 4, i) for i in range(args.batch_size)], params)
@@ -224,13 +250,26 @@ def workload(args):
 
 def swap_check(args):
     """Production-weight forced swap with the same batch composition."""
-    prompts = workload_prompts()[:4]
+    prompts = workload_prompts(args.model_path)[:4]
     override = yaml.safe_load(Path('script/tah/recipes/qwen3_1.7/eval_tah.yaml').read_text())
-    engine = TaHEngine('models/TaH-plus-1.7B', override, max_batch_size=4, kv_capacity=10000,
-                      swap_chunk_entries=7, prefill_chunk_size=128)
+    engine = TaHEngine(args.model_path, override, max_batch_size=4, kv_capacity=10000,
+                      swap_chunk_entries=7, prefill_chunk_size=128, cuda_graphs=args.cuda_graphs,
+                      compile=args.compile, compile_cache_dir=args.compile_cache_dir,
+                      graph_batch_sizes=args.graph_batch_sizes)
     params = SamplingParams(temperature=.6, top_k=20, top_p=.95)
     requests = [Request(p, 128, i) for i, p in enumerate(prompts)]
+    decisions = []
+    original_decode = engine._decode
+    def observed_decode(running):
+        status = original_decode(running)
+        decisions.extend((s.index, s.position, s.depth, bool(row[0])) for s, row in zip(running, status))
+        return status
+    engine._decode = observed_decode
+    engine.cuda_graphs = False
     expected = engine.generate(requests, params)
+    expected_decisions = decisions.copy()
+    decisions.clear()
+    engine.cuda_graphs = args.cuda_graphs
     checks = []
     def hook(engine, running, swapped, free_rows):
         if engine.last_run['steps'] != 32:
@@ -247,20 +286,198 @@ def swap_check(args):
     engine._step_hook = hook
     actual = engine.generate(requests, params)
     assert len(checks) == 1
+    assert decisions == expected_decisions
     assert [(r.token_ids, r.prompt_pass_counts, r.generated_pass_counts) for r in actual] == [
         (r.token_ids, r.prompt_pass_counts, r.generated_pass_counts) for r in expected]
     return dict(status='PASS', gate='G-ROBUST forced swap identity', requests=len(requests),
                 output_tokens=sum(len(r.token_ids) for r in actual), checks=checks,
-                run=engine.last_run, kv_audit=engine.pool.audit(), host_swap_used_bytes=engine.swap.used_bytes)
+                run=engine.last_run, kv_audit=engine.pool.audit(), host_swap_used_bytes=engine.swap.used_bytes,
+                decision_rows=len(decisions), decisions_identical=True, memory_budget=engine.memory_budget)
+
+
+def smoke(args):
+    """W-smoke graph/eager identity, sharing capacity and request composition."""
+    prompts = workload_prompts(args.model_path, repeat=1)[:16]
+    override = yaml.safe_load(Path('script/tah/recipes/qwen3_1.7/eval_tah.yaml').read_text())
+    engine = TaHEngine(args.model_path, override, max_batch_size=args.batch_size,
+                      memory_fraction=args.memory_fraction, cuda_graphs=args.cuda_graphs,
+                      compile=args.compile, compile_cache_dir=args.compile_cache_dir,
+                      graph_batch_sizes=args.graph_batch_sizes)
+    requests = [Request(p, 1024, i) for i, p in enumerate(prompts)]
+    params = SamplingParams(temperature=.6, top_k=20, top_p=.95)
+    decisions = []
+    decode = engine._decode
+    def observed(running):
+        status = decode(running)
+        decisions.extend((s.index, s.position, s.depth, bool(row[0])) for s, row in zip(running, status))
+        return status
+    engine._decode = observed
+    engine.cuda_graphs = False
+    expected = engine.generate(requests, params)
+    eager_run, expected_decisions = engine.last_run, decisions.copy()
+    decisions.clear()
+    engine.cuda_graphs = args.cuda_graphs
+    actual = engine.generate(requests, params)
+    assert decisions == expected_decisions, 'graph/eager decode decisions differ'
+    assert [(r.token_ids, r.prompt_pass_counts, r.generated_pass_counts, r.finish_reason) for r in actual] == [
+        (r.token_ids, r.prompt_pass_counts, r.generated_pass_counts, r.finish_reason) for r in expected]
+    if args.cuda_graphs:
+        assert engine.last_run['graph_steps'] == engine.last_run['steps'] > 0
+    assert engine.pool.audit()['free'] == engine.pool.capacity and engine.swap.used_bytes == 0
+    return dict(status='PASS', workload='W-smoke', requests=16, max_new_tokens=1024,
+        tokens_identical=True, decisions_identical=True, pass_counts_identical=True,
+        decision_rows=len(decisions), decision_sha256=hashlib.sha256(json.dumps(decisions).encode()).hexdigest(),
+        eager_run=eager_run, run=engine.last_run, memory_budget=engine.memory_budget,
+        kv_audit=engine.pool.audit(), results=[asdict(r) for r in actual])
+
+
+def phase_profile(args):
+    """Short real admission/prefill and forced swap launch-gap diagnostic."""
+    from torch.profiler import record_function
+    prompts = workload_prompts(args.model_path)[:4]
+    override = yaml.safe_load(Path('script/tah/recipes/qwen3_1.7/eval_tah.yaml').read_text())
+    engine = TaHEngine(args.model_path, override, max_batch_size=4, kv_capacity=10000,
+                      swap_chunk_entries=256, cuda_graphs=args.cuda_graphs,
+                      compile=args.compile, compile_cache_dir=args.compile_cache_dir,
+                      graph_batch_sizes=args.graph_batch_sizes)
+    requests = [Request(p, 48, i) for i, p in enumerate(prompts)]
+    params = SamplingParams(temperature=.6, top_k=20, top_p=.95)
+    timings = dict(prefill=[], swap_out=[], swap_in=[], decode=[])
+    for name, owner, method in [('prefill', engine, '_prefill'), ('swap_out', engine.swap, 'out'),
+                                ('swap_in', engine.swap, 'restore'), ('decode', engine, '_decode')]:
+        original = getattr(owner, method)
+        def wrapped(*a, _name=name, _fn=original, **kw):
+            with record_function('engine_phase_' + _name):
+                start = time.perf_counter()
+                result = _fn(*a, **kw)
+                timings[_name].append((time.perf_counter() - start) * 1000)
+                return result
+        setattr(owner, method, wrapped)
+    def hook(engine, running, swapped, free_rows):
+        if engine.last_run['steps'] == 16:
+            engine._swap_out(running[-1], running, swapped, free_rows)
+            engine._restore(running, swapped, free_rows)
+    engine._step_hook = hook
+    engine.generate(requests, params)
+    for samples in timings.values():
+        samples.clear()
+    engine.generate(requests, params)
+    unprofiled = {name: values.copy() for name, values in timings.items()}
+    for samples in timings.values():
+        samples.clear()
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
+                                            torch.profiler.ProfilerActivity.CUDA]) as prof:
+        engine.generate(requests, params)
+    trace_path = args.output.with_suffix('.trace.json')
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    prof.export_chrome_trace(str(trace_path))
+    trace = json.loads(trace_path.read_text())['traceEvents']
+    physical = [e for e in trace if e.get('cat') in ('kernel', 'gpu_memcpy', 'gpu_memset')]
+    phases = {}
+    for name, samples in unprofiled.items():
+        scopes = [e for e in trace if e.get('cat') == 'user_annotation' and e.get('name') == 'engine_phase_' + name]
+        assert len(scopes) == len(samples) > 0
+        spans = [(e['ts'], e['ts'] + e['dur']) for e in scopes]
+        # Swap transfers may finish after their CPU issue scope. Retain that
+        # distinction instead of incorrectly treating the gap as GPU idle.
+        work = [e for e in physical if any(a <= e['ts'] and e['ts'] + e['dur'] <= b for a, b in spans)]
+        device_ms = sum(e['dur'] for e in work) / 1000 / len(samples)
+        phases[name] = dict(calls=len(samples), unprofiled_mean_host_ms=statistics.mean(samples),
+            profiled_mean_host_ms=sum(e['dur'] for e in scopes) / 1000 / len(samples),
+            mean_kernel_ms=sum(e['dur'] for e in work if e['cat'] == 'kernel') / 1000 / len(samples),
+            mean_copy_ms=sum(e['dur'] for e in work if e['cat'] != 'kernel') / 1000 / len(samples),
+            estimated_host_minus_in_scope_device_ms=statistics.mean(samples) - device_ms)
+    return dict(status='PASS', phases=phases, run=engine.last_run, trace_file=str(trace_path),
+        trace_sha256=digest(trace_path), note='Scope wall timings include host admission/plan/issue work. '
+        'Decode/prefill finish with status copies; swap is asynchronous, so device work can spill into the following scope. '
+        'Negative residuals reflect profiler duration distortion/overlap and are not negative idle time.')
+
+
+def overlap_probe(engine, requests, params):
+    """Measure branch-independent next-step host drafts during live GPU work.
+
+    Never use an assumed decision to mutate KV or state. Both outcomes are
+    prepared on the host only; actual admission/allocation still waits for t.
+    """
+    original = engine.graphs.run
+    samples = []
+    def run(bucket, engine, rotary):
+        measured = engine.last_run['steps'] < 11
+        if not measured:
+            return original(bucket, engine, rotary)
+        # Compare the SAME prepared step, not two independent prefills whose
+        # paged layouts/allocator histories differ. These are the only mutable
+        # step inputs; global state and current KV writes are overwritten by
+        # the second replay, which becomes the actual scheduler result.
+        logits, counters = bucket.logits.clone(), bucket.rng.counters.clone()
+        baseline = original(bucket, engine, rotary).clone()
+        baseline_done = torch.cuda.Event()
+        baseline_done.record()
+        while not baseline_done.query():
+            time.sleep(.0001)
+        bucket.logits.copy_(logits)
+        bucket.rng.counters.copy_(counters)
+        events = [torch.cuda.Event(enable_timing=True) for _ in range(2)] if measured else None
+        if events:
+            events[0].record()
+        status = original(bucket, engine, rotary)
+        if events:
+            events[1].record()
+            ready_before = events[1].query()
+            start = time.perf_counter()
+            drafts = []
+            for continued in (False, True):
+                offset = 0
+                for row in bucket.attention.rows:
+                    keep = continued and row.depth < engine.model.max_iter
+                    depth, position = (row.depth + 1, row.position) if keep else (1, row.position + 1)
+                    tables = row.request.streams
+                    lengths = [t.size + (d == depth - 1) for d, t in enumerate(tables)]
+                    visible = sum(bisect_right(t.host_positions, position) for t in tables[:depth]) + 1
+                    drafts.append([*[t.slots.data_ptr() for t in tables],
+                                   *[t.positions.data_ptr() for t in tables], *lengths,
+                                   offset, sum(lengths), position, depth, visible])
+                    offset += sum(lengths)
+            # The same pinned descriptor construction used by real planning;
+            # no H2D upload or shared step-buffer write happens here.
+            host = torch.tensor(drafts, dtype=torch.long, pin_memory=True)
+            duration = (time.perf_counter() - start) * 1000
+            ready_after = events[1].query()
+            parity = ((baseline == status) | (baseline.isnan() & status.isnan())).all(0)
+            samples.append((duration, ready_before, ready_after, events,
+                            host.numel() * host.element_size(), parity, events[0].query()))
+        return status
+    engine.graphs.run = run
+    previous_profile_steps = engine.profile_steps
+    engine.profile_steps = 0
+    try:
+        engine.generate(requests, params)
+    finally:
+        engine.graphs.run = original
+        engine.profile_steps = previous_profile_steps
+    parity = torch.stack([s[5] for s in samples]).cpu().tolist()
+    assert all(all(fields) for fields in parity), parity
+    return dict(steps=len(samples), mean_host_draft_ms=statistics.mean(s[0] for s in samples),
+        mean_gpu_step_ms=statistics.mean(s[3][0].elapsed_time(s[3][1]) for s in samples),
+        gpu_pending_before=sum(not s[1] for s in samples), gpu_pending_after=sum(not s[2] for s in samples),
+        gpu_started_by_draft_end=sum(s[6] for s in samples),
+        descriptor_bytes_per_step=[s[4] for s in samples],
+        same_step_status_identity=parity,
+        parity_control='identical prepared inputs, counters, positions/depths and KV layout; exact keep/token/raw/probability',
+        note='Two candidate host descriptor/count drafts overlap GPU step t. They are discarded: '
+        'actual next depths/positions, EOS/removal, admission/preemption and table growth depend on its status. '
+        'Using these drafts for a full next step would require additional buffer/table lifetime work; no runtime lookahead is enabled.')
 
 
 def profile(args):
-    prompts = workload_prompts()
+    prompts = workload_prompts(args.model_path)
     if args.profile_context:
         prompts = [(p * (args.profile_context // len(p) + 1))[:args.profile_context] for p in prompts]
     override = yaml.safe_load(Path('script/tah/recipes/qwen3_1.7/eval_tah.yaml').read_text())
-    engine = TaHEngine('models/TaH-plus-1.7B', override, max_batch_size=args.batch_size,
-                      prefill_chunk_size=128, profile_steps=0, admission_headroom=0)
+    engine = TaHEngine(args.model_path, override, max_batch_size=args.batch_size,
+                      prefill_chunk_size=128, profile_steps=0, admission_headroom=0, cuda_graphs=args.cuda_graphs,
+                      compile=args.compile, compile_cache_dir=args.compile_cache_dir,
+                      graph_batch_sizes=args.graph_batch_sizes)
     params = SamplingParams(temperature=.6, top_k=20, top_p=.95)
     requests = [Request(prompts[i % len(prompts)], 12, i) for i in range(args.batch_size)]
     engine.generate(requests, params)
@@ -299,22 +516,25 @@ def profile(args):
     finally:
         if started and not closed:
             prof.__exit__(None, None, None)
-    steps = [e for e in prof.events() if e.name == 'engine_decode_step'
-             and e.device_type == torch.autograd.DeviceType.CPU]
+    # Work directly from raw Kineto activities. Expanding CUDA graph nodes
+    # into Python FunctionEvent trees can use gigabytes and add no information
+    # to the physical kernel/copy accounting needed here.
+    raw_events = prof.profiler.kineto_results.events()
+    steps = [e for e in raw_events if e.name() == 'engine_decode_step'
+             and e.device_type() == torch.autograd.DeviceType.CPU]
     def covered(start, end, scopes):
         return any(a <= start and end <= b for a, b in scopes)
-    scopes = [(e.time_range.start, e.time_range.end) for e in steps]
+    scopes = [(e.start_ns(), e.end_ns()) for e in steps]
     # CPU inclusive device totals can duplicate activities (including an
     # "Unrecognized" CPU event) and include GPU user-annotation envelopes.
     # Count actual CUDA events once; annotation spans are NOT kernels.
-    device_events = [e for e in prof.events() if e.device_type == torch.autograd.DeviceType.CUDA
-                     and not e.is_user_annotation and covered(e.time_range.start, e.time_range.end, scopes)]
-    gpu_us = sum(e.device_time_total for e in device_events)
-    def is_copy(name):
-        return 'memcpy' in name.lower() or 'memset' in name.lower()
-    kernel_us = sum(e.device_time_total for e in device_events if not is_copy(e.name))
+    device_events = [e for e in raw_events if e.device_type() == torch.autograd.DeviceType.CUDA
+                     and not e.is_user_annotation() and covered(e.start_ns(), e.end_ns(), scopes)]
+    gpu_us = sum((e.end_ns() - e.start_ns()) / 1000 for e in device_events)
+    kernel_us = sum((e.end_ns() - e.start_ns()) / 1000 for e in device_events
+                    if not cuda_transfer_activity(e.name()))
     transfer_us = gpu_us - kernel_us
-    wall_us = sum(s.cpu_time_total for s in steps)
+    wall_us = sum((s.end_ns() - s.start_ns()) / 1000 for s in steps)
     assert 0 < kernel_us <= gpu_us <= wall_us
     unprofiled = unprofiled[:len(steps)]
     observed = engine.last_run['profile'][:len(steps)]
@@ -322,7 +542,8 @@ def profile(args):
     unprofiled_mean = statistics.mean(p['total_ms'] for p in unprofiled)
     grouped = {}
     for event in device_events:
-        grouped[event.name] = grouped.get(event.name, 0.) + event.device_time_total
+        name = event.name()
+        grouped[name] = grouped.get(name, 0.) + (event.end_ns() - event.start_ns()) / 1000
     trace_path = args.output.with_suffix('.trace.json')
     trace_path.parent.mkdir(parents=True, exist_ok=True)
     prof.export_chrome_trace(str(trace_path))
@@ -333,6 +554,11 @@ def profile(args):
     trace_device = [e for e in trace if e.get('cat') in ('kernel', 'gpu_memcpy', 'gpu_memset')
                     and covered(e['ts'], e['ts'] + e['dur'], trace_steps)]
     trace_gpu_us = sum(e['dur'] for e in trace_device)
+    args.output.with_suffix('.timings.json').write_text(json.dumps(dict(
+        unprofiled_event_profile=unprofiled, event_profile=engine.last_run['profile'],
+        memory_budget=engine.memory_budget, run=engine.last_run,
+        raw_gpu_us=gpu_us, raw_kernel_us=kernel_us, raw_wall_us=wall_us,
+        raw_cuda_activities=len(device_events), trace_cuda_activities=len(trace_device)), indent=2))
     assert len(trace_device) == len(device_events)
     assert abs(trace_gpu_us - gpu_us) < .1, (trace_gpu_us, gpu_us)
     audit = trace_profile_totals(trace)
@@ -340,6 +566,7 @@ def profile(args):
     assert abs(audit['kernel_us'] - kernel_us) < .1
     assert abs(audit['wall_us'] - wall_us) < .1
     report = dict(status='PASS', batch_size=args.batch_size, context=args.profile_context,
+        memory_budget=engine.memory_budget, run=engine.last_run,
         context_source='repeated real workload prompts; actual model prefill', admission_headroom=0,
         observed_batch_sizes=[p['batch_size'] for p in engine.last_run['profile'][:len(steps)]], decode_steps=len(steps),
         mean_step_wall_ms=wall_us / len(steps) / 1000,
@@ -353,17 +580,36 @@ def profile(args):
         verification=dict(actual_cuda_device_us=gpu_us, trace_cuda_device_us=trace_gpu_us,
                           actual_cuda_activities=len(device_events), kernel_us=kernel_us,
                           cpu_step_scopes=len(steps), source_trace_sha256=digest(trace_path),
-                          discarded_cpu_inclusive_device_us=sum(s.device_time_total for s in steps),
+                          raw_kineto_activities=len(raw_events),
+                          accounting='raw Kineto physical CUDA activities cross-checked against Chrome trace',
                           trace_file=str(trace_path)),
         top_gpu_kernels=[dict(name=name, total_gpu_ms=duration / 1000)
             for name, duration in sorted(grouped.items(), key=lambda pair: pair[1], reverse=True)[:20]],
         note='GPU kernel sum is device execution time; stream events include CPU launch gaps. The unprofiled residual uses device durations from an equivalent profiled run and is an estimate. CPU and GPU overlap; residuals are not additive CPU utilization. The profiled residual includes profiler overhead.')
+    if args.cuda_graphs and report['estimated_unprofiled_python_launch_idle_ms'] > 2:
+        report['overlap_probe'] = overlap_probe(engine, requests, params)
     return report
+
+
+def overlap_check(args):
+    if not args.cuda_graphs:
+        raise ValueError('overlap diagnostic requires --cuda-graphs')
+    prompts = workload_prompts(args.model_path)
+    if args.profile_context:
+        prompts = [(p * (args.profile_context // len(p) + 1))[:args.profile_context] for p in prompts]
+    override = yaml.safe_load(Path('script/tah/recipes/qwen3_1.7/eval_tah.yaml').read_text())
+    engine = TaHEngine(args.model_path, override, max_batch_size=args.batch_size,
+                      admission_headroom=0, cuda_graphs=True, compile=args.compile,
+                      compile_cache_dir=args.compile_cache_dir,
+                      graph_batch_sizes=args.graph_batch_sizes)
+    requests = [Request(prompts[i % len(prompts)], 12, i) for i in range(args.batch_size)]
+    result = overlap_probe(engine, requests, SamplingParams(temperature=.6, top_k=20, top_p=.95))
+    return dict(status='PASS', overlap_probe=result, memory_budget=engine.memory_budget)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--gate', choices=['gen', 'tf', 'perf', 'robust', 'long-prompt', 'swap', 'profile'], required=True)
+    parser.add_argument('--gate', choices=['gen', 'tf', 'smoke', 'perf', 'robust', 'long-prompt', 'swap', 'profile', 'phase-profile', 'overlap'], required=True)
     parser.add_argument('--checkpoint', choices=['real', 'mlp3', 'mlp1', 'label3'], default='real')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--batch-size', type=int, default=128)
@@ -372,12 +618,24 @@ def main():
     parser.add_argument('--end', type=int, default=128)
     parser.add_argument('--memory-fraction', type=float, default=.9)
     parser.add_argument('--profile-context', type=int, default=2048)
+    parser.add_argument('--model-path', type=Path, default=Path('models/TaH-plus-1.7B'))
+    parser.add_argument('--cuda-graphs', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--compile', action=argparse.BooleanOptionalAction, default=False,
+                        help='fuse decode with TorchInductor and reuse its persistent disk cache')
+    parser.add_argument('--compile-cache-dir', type=Path,
+                        help='TorchInductor disk cache (default: TORCHINDUCTOR_CACHE_DIR or ~/.cache/torch/inductor)')
+    parser.add_argument('--graph-batch-sizes', type=parse_graph_batch_sizes,
+                        help='comma-separated exact batch sizes to capture, e.g. 54,55,58,60,64')
     args = parser.parse_args()
     torch.set_num_threads(2)
     start = time.perf_counter()
     report = (parity(args) if args.gate in ('gen', 'tf') else profile(args) if args.gate == 'profile'
-              else swap_check(args) if args.gate == 'swap' else workload(args))
-    report.update(process_seconds=time.perf_counter() - start, device=torch.cuda.get_device_name(),
+              else swap_check(args) if args.gate == 'swap' else smoke(args) if args.gate == 'smoke'
+              else overlap_check(args) if args.gate == 'overlap'
+              else phase_profile(args) if args.gate == 'phase-profile' else workload(args))
+    report.update(process_seconds=time.perf_counter() - start, device=torch.cuda.get_device_name(), cuda_graphs=args.cuda_graphs,
+        compile=args.compile, compile_cache_dir=str(args.compile_cache_dir) if args.compile_cache_dir else None,
+        graph_batch_sizes=args.graph_batch_sizes,
         runtime_sha256={str(p): digest(p) for p in Path('tah/engine').glob('*.py')})
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2))
