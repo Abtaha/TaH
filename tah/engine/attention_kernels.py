@@ -74,3 +74,20 @@ def stage_sources(descriptors, slots, positions, depths, starts, lengths,
             tl.store(positions + dest + offset, tl.load(source_pos + offset, mask, other=0), mask)
             tl.store(depths + dest + offset, stream + 1, mask)
         dest += size
+
+
+@triton.jit
+def write_table_entries(writes, count, BLOCK: tl.constexpr):
+    """Scatter (slots_ptr, positions_ptr, index, slot, position) rows into tables."""
+    entry = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = entry < count
+    base = writes + entry * 5
+    slots_ptr = tl.load(base, mask, other=0)
+    pos_ptr = tl.load(base + 1, mask, other=0)
+    index = tl.load(base + 2, mask, other=0)
+    slot = tl.load(base + 3, mask, other=0)
+    position = tl.load(base + 4, mask, other=0)
+    slot_target = tl.cast(slots_ptr, tl.pointer_type(tl.int32)) + index
+    pos_target = tl.cast(pos_ptr, tl.pointer_type(tl.int64)) + index
+    tl.store(slot_target, slot.to(tl.int32), mask)
+    tl.store(pos_target, position, mask)

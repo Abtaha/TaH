@@ -37,10 +37,11 @@ def generate(args):
     if manifest_path.exists():
         raise ValueError('corpus already exists; preserve it and use another --root')
     engine = TaHEngine(root, override, max_batch_size=6, prefill_chunk_size=128, kv_capacity=20000,
-                       compile=args.compile, compile_cache_dir=args.compile_cache_dir)
+                       compile=args.compile, compile_cache_dir=args.compile_cache_dir,
+                       overlap=args.overlap)
     manifest = dict(checkpoint=args.checkpoint, status='partial', generated_positions=0,
         groups=[], sampling=asdict(SamplingParams(temperature=.6, top_k=20, top_p=.95)),
-        prefill_chunk_size=128, compile=args.compile,
+        prefill_chunk_size=128, compile=args.compile, overlap=args.overlap,
         compile_cache_dir=engine.compiled_step.cache_dir if engine.compiled_step else None,
         startup_compile_seconds=engine.compiled_step.compile_seconds if engine.compiled_step else 0.,
         startup_compile_graphs=engine.compiled_step.compile_graphs if engine.compiled_step else 0,
@@ -217,6 +218,8 @@ def main():
     parser.add_argument('--min-generated-positions', type=int, default=8192)
     parser.add_argument('--compile', action=argparse.BooleanOptionalAction, default=False,
                         help='use the full-graph TorchInductor decode path')
+    parser.add_argument('--overlap', action=argparse.BooleanOptionalAction, default=False,
+                        help='generate the corpus with the overlap (pipelined) scheduler')
     parser.add_argument('--compile-cache-dir', type=Path,
                         help='TorchInductor disk cache (default: TORCHINDUCTOR_CACHE_DIR or ~/.cache/torch/inductor)')
     args = parser.parse_args()

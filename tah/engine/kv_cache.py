@@ -15,6 +15,10 @@ class KVCapacityError(RuntimeError):
     pass
 
 
+def triton_blocks(count, block=128):
+    return (count + block - 1) // block
+
+
 @dataclass
 class StreamTable:
     slots: torch.Tensor
@@ -49,7 +53,7 @@ class KVSnapshot:
 
 class SlotPool:
     def __init__(self, capacity, num_layers, num_kv_heads, head_dim, max_iter, *,
-                 device, dtype=torch.bfloat16):
+                 device, dtype=torch.bfloat16, trash_slot=False):
         dimensions = (capacity, num_layers, num_kv_heads, head_dim, max_iter)
         if any(not isinstance(x, int) or x < 1 for x in dimensions):
             raise ValueError("KV dimensions and max_iter must be positive integers")
@@ -57,7 +61,10 @@ class SlotPool:
             raise ValueError("page-size-one slot IDs must fit int32")
         self.capacity, self.max_iter = capacity, max_iter
         self.device, self.dtype = torch.device(device), dtype
-        self.values = torch.empty(num_layers, 2, capacity, 1, num_kv_heads, head_dim,
+        # Optional write-only slot beyond capacity: never in a free list or a
+        # stream table, so no attention row can read it (overlap ghost rows).
+        self.trash_slot = capacity if trash_slot else None
+        self.values = torch.empty(num_layers, 2, capacity + bool(trash_slot), 1, num_kv_heads, head_dim,
                                   device=self.device, dtype=dtype)
         # Canonicalize e.g. device='cuda' to the actual indexed CUDA device.
         self.device = self.values.device
@@ -136,6 +143,89 @@ class SlotPool:
         request.revision += 1
         self.allocations += len(ids)
         return slot_ids.long()
+
+    @torch.inference_mode()
+    def reserve(self, entries):
+        """Batch allocate [(request, stream, position)] with ONE device table write.
+
+        Same per-stream rules as allocate(); entries for one stream must be in
+        increasing order. Atomic on validation/capacity failure. Returns slot IDs.
+        """
+        entries = list(entries)
+        if len(entries) > self.free_slots:
+            raise KVCapacityError("KV pool exhausted; swap a request before allocating")
+        last, added = {}, {}
+        for request, stream, position in entries:
+            self._request(request)
+            if not isinstance(stream, int) or not 0 <= stream < self.max_iter:
+                raise ValueError("stream outside max_iter")
+            table = request.streams[stream]
+            key = (id(request), stream)
+            previous = last.get(key, table.host_positions[-1] if table.size else -1)
+            if not isinstance(position, int) or not previous < position < request.context_limit:
+                raise ValueError("positions must increase strictly and fit model context_limit")
+            last[key] = position
+            added[id(request)] = added.get(id(request), 0) + 1
+            if request.size + added[id(request)] > self.capacity:
+                raise KVCapacityError("request cannot fit the KV pool alone; increase KV budget or reject it")
+        if not entries:
+            return []
+        counts = {}
+        for request, stream, _ in entries:
+            counts[(id(request), stream)] = counts.get((id(request), stream), 0) + 1
+        grown = set()
+        for request, stream, _ in entries:
+            key = (id(request), stream)
+            if key in grown:
+                continue
+            grown.add(key)
+            table = request.streams[stream]
+            needed = table.size + counts[key]
+            if needed > table.slots.numel():
+                size = min(request.context_limit, max(needed, max(8, 2 * table.slots.numel())))
+                slots = torch.empty(size, dtype=torch.int32, device=self.device)
+                pos = torch.empty(size, dtype=torch.long, device=self.device)
+                slots[:table.size].copy_(table.slots[:table.size])
+                pos[:table.size].copy_(table.positions[:table.size])
+                table.slots, table.positions = slots, pos
+        ids = self._free[-len(entries):][::-1]
+        del self._free[-len(entries):]
+        writes = []
+        for (request, stream, position), slot in zip(entries, ids):
+            table = request.streams[stream]
+            writes.append((table.slots.data_ptr(), table.positions.data_ptr(), table.size, slot, position))
+            if self.device.type != 'cuda':
+                table.slots[table.size] = slot
+                table.positions[table.size] = position
+            self._owners[slot] = (request.request_id, stream, position)
+            table.host_slots.append(slot)
+            table.host_positions.append(position)
+            request.revision += 1
+        self.allocations += len(ids)
+        if self.device.type == 'cuda':
+            from .attention_kernels import write_table_entries
+            # Fresh pinned tensor: its allocator tracks the asynchronous DMA.
+            host = torch.tensor(writes, dtype=torch.long, pin_memory=True)
+            device = host.to(self.device, non_blocking=True)
+            write_table_entries[(triton_blocks(len(writes)),)](device, len(writes), BLOCK=128)
+        return ids
+
+    def pop_last(self, request, stream, position):
+        """Release the newest entry of one stream (an unused speculative slot).
+
+        The device table entry beyond the host size is ignored by every reader.
+        """
+        self._request(request)
+        table = request.streams[stream]
+        if not table.size or table.host_positions[-1] != position:
+            raise ValueError("pop_last requires the stream's newest position")
+        slot = table.host_slots.pop()
+        table.host_positions.pop()
+        del self._owners[slot]
+        self._free.append(slot)
+        self.frees += 1
+        request.revision += 1
+        return slot
 
     def release(self, request):
         self._request(request)

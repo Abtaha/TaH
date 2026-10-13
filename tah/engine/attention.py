@@ -99,13 +99,16 @@ class DecodeBucket:
                 self.last = self.wrapper._paged_kv_last_page_len_buf
 
     @torch.inference_mode()
-    def prepare(self, rows):
+    def prepare(self, rows, query=None):
         """Host O(B*N) descriptors + one ragged staging launch, outside capture.
 
         Host planning counts use bisect on the allocation ledger (O(log T) per
         stream), with no device-to-host sync. Device kernels independently count
         and compact entries; the host counts are ONLY FlashInfer planning input.
         Reprepare after table growth, slot changes, or row position/depth changes.
+        query=(positions, depths) device tensors replace the rows' host query
+        coordinates before visibility is built (the overlap scheduler selects
+        each row's next pass on the device). Static plans then skip host counts.
         """
         validate_rows(self.pool, rows)
         if len(rows) != self.batch_size:
@@ -119,7 +122,8 @@ class DecodeBucket:
         for row in rows:
             starts.append(offset)
             lengths.append(row.request.size)
-            counts.append(self.pool.visible_count(row.request, row.position, row.depth))
+            if query is None or not self.static_plan:
+                counts.append(self.pool.visible_count(row.request, row.position, row.depth))
             tables = row.request.streams
             descriptors.append([*[t.slots.data_ptr() for t in tables],
                                 *[t.positions.data_ptr() for t in tables],
@@ -146,11 +150,16 @@ class DecodeBucket:
                                  (self.query_pos, [r.position for r in rows]),
                                  (self.query_depth, [r.depth for r in rows])):
                 dest.copy_(torch.tensor(values, dtype=dest.dtype))
-        host_ptr = torch.tensor([0, *torch.tensor(counts).cumsum(0).tolist()], dtype=torch.int32)
+        if query is not None:
+            self.query_pos.copy_(query[0])
+            self.query_depth.copy_(query[1])
         self.rows = tuple(rows)
         self.revisions = tuple(r.request.revision for r in rows)
         self.build()
         if self.wrapper is not None and not self.static_plan:
+            if query is not None:
+                raise ValueError("device query coordinates require a static decode plan")
+            host_ptr = torch.tensor([0, *torch.tensor(counts).cumsum(0).tolist()], dtype=torch.int32)
             # CPU indptr/last avoid FlashInfer's hidden device->host transfers.
             self.wrapper.plan(host_ptr, self.indices, torch.ones(self.batch_size, dtype=torch.int32),
                 self.num_q_heads, self.pool.values.shape[-2], self.pool.values.shape[-1], 1,

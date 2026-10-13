@@ -1,4 +1,4 @@
-"""Host request ledger and bounded pinned-host swapping (no recomputation)."""
+"""Host request ledger and bounded pinned-host swapping with overflow restart."""
 from dataclasses import dataclass, field
 import torch
 
@@ -43,7 +43,11 @@ class State:
     prefill_seconds: float = 0.
     admitted: float = 0.
     swaps: int = 0
+    restarts: int = 0
+    wasted_tokens: int = 0
     snapshot: object = None
+    inflight: object = None  # overlap: last launched step id containing this row
+    spec_a: object = None  # overlap: (step, stream, position) unresolved deeper-pass slot
 
 
 @dataclass
@@ -56,6 +60,10 @@ class SwapSnapshot:
     counters: torch.Tensor
     nbytes: int
     event: object
+
+
+class HostSwapOverflow(KVCapacityError):
+    """Budget refusal before allocating or changing any request state."""
 
 
 class HostSwap:
@@ -77,17 +85,20 @@ class HostSwap:
     def _host(self, shape, dtype):
         return torch.empty(shape, dtype=dtype, pin_memory=self.pool.device.type == 'cuda')
 
+    def required_bytes(self, state, device_state):
+        per_slot = self.pool.values[:, :, :1].numel() * self.pool.values.element_size()
+        count = state.cache.size
+        return count * (per_slot + 80) + 1024 + sum(
+            t[state.row].numel() * t.element_size() for t in device_state)
+
     def out(self, state, device_state):
         pool, cache, row = self.pool, state.cache, state.row
+        nbytes = self.required_bytes(state, device_state)
+        if self.used_bytes + nbytes > self.budget_bytes:
+            raise HostSwapOverflow(f'host swap budget exceeded: need {nbytes} bytes, '
+                                   f'{self.budget_bytes - self.used_bytes} available')
         positions = tuple(tuple(t.host_positions) for t in cache.streams)
         ids = [slot for t in cache.streams for slot in t.host_slots]
-        per_slot = pool.values.numel() * pool.values.element_size() // pool.capacity
-        nbytes = len(ids) * per_slot + sum(t[row].numel() * t.element_size() for t in device_state)
-        # Include host coordinate/slot ledger overhead conservatively too.
-        nbytes += len(ids) * 80 + 1024
-        if self.used_bytes + nbytes > self.budget_bytes:
-            raise KVCapacityError(f'host swap budget exceeded: need {nbytes} bytes, '
-                                  f'{self.budget_bytes - self.used_bytes} available')
         kv = self._host((pool.values.shape[0], 2, len(ids), *pool.values.shape[3:]), pool.dtype)
         for start in range(0, len(ids), self.chunk_entries):
             part = ids[start:start + self.chunk_entries]

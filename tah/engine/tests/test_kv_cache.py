@@ -80,3 +80,40 @@ def test_long_request_tables_not_batch_times_longest():
     for r in [long, *short]:
         p.release(r)
     assert p.audit()['free'] == 20000
+
+
+def test_batch_reserve_pop_last_and_trash_slot():
+    p = SlotPool(16, 2, 2, 8, 3, device='cpu', trash_slot=True)
+    assert p.trash_slot == 16 and p.values.shape[2] == 17 and p.free_slots == 16
+    a, b = [p.create_request(i, context_limit=10) for i in range(2)]
+    p.allocate(a, 0, [0, 1])
+    # Mixed requests/streams in one call; same-stream entries must increase.
+    ids = p.reserve([(a, 1, 1), (a, 0, 2), (b, 0, 0), (b, 0, 1)])
+    assert len(set(ids)) == 4 and p.free_slots == 10
+    assert a.streams[0].host_positions == [0, 1, 2] and b.streams[0].host_positions == [0, 1]
+    assert a.streams[0].slots[:3].tolist() == a.streams[0].host_slots
+    assert a.streams[0].positions[:3].tolist() == [0, 1, 2]
+    assert b.streams[0].slots[:2].tolist() == b.streams[0].host_slots
+    p.audit()
+    before = p.audit()
+    for bad in ([(a, 0, 2)], [(b, 0, 3), (b, 0, 2)], [(a, 3, 5)], [(a, 1, 10)]):
+        with pytest.raises(ValueError):
+            p.reserve(bad)
+        assert p.audit() == before
+    with pytest.raises(KVCapacityError, match='exhausted'):
+        p.reserve([(b, 2, i) for i in range(11)])
+    assert p.audit() == before
+    # Popping the newest entry returns its slot; non-newest positions refuse.
+    with pytest.raises(ValueError, match='newest'):
+        p.pop_last(a, 0, 1)
+    slot = a.streams[0].host_slots[-1]
+    assert p.pop_last(a, 0, 2) == slot and p.free_slots == 11
+    assert a.streams[0].host_positions == [0, 1]
+    p.reserve([(a, 0, 2)])  # the freed coordinate can be reserved again
+    assert p.trash_slot not in p._owners and p.audit()['owned'] == 6
+    # Many entries in one stream grow its table geometrically.
+    p.reserve([(b, 1, i) for i in range(1, 9)])
+    assert b.streams[1].positions[:8].tolist() == list(range(1, 9))
+    for r in (a, b):
+        p.release(r)
+    assert p.audit()['free'] == 16 and p.allocations == p.frees

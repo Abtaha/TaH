@@ -104,6 +104,22 @@ class Observer:
             torch.empty(0, dtype=torch.long), torch.empty(0, dtype=torch.long), torch.empty(n, 0, 0, 0))
 
 
+def record_decisions(engine, decisions):
+    """Collect (index, position, depth, keep) of executed live rows in either scheduler."""
+    if engine.overlap:
+        def resolved(record, rows):
+            decisions.extend((index, pos, depth, keep) for _, index, pos, depth, keep in rows)
+        engine._resolved_hook = resolved
+        return lambda: setattr(engine, '_resolved_hook', None)
+    decode = engine._decode
+    def observed(running):
+        status = decode(running)
+        decisions.extend((s.index, s.position, s.depth, bool(row[0])) for s, row in zip(running, status))
+        return status
+    engine._decode = observed
+    return lambda: setattr(engine, '_decode', decode)
+
+
 def fixture_setup(name):
     suite = FixtureSuite('data/engine/fixtures/reference')
     require_production(suite)
@@ -128,7 +144,7 @@ def parity(args):
     engine = TaHEngine(root, override, max_batch_size=6, prefill_chunk_size=128, kv_capacity=20000,
                       cuda_graphs=args.cuda_graphs, compile=args.compile,
                       compile_cache_dir=args.compile_cache_dir,
-                      graph_batch_sizes=args.graph_batch_sizes)
+                      graph_batch_sizes=args.graph_batch_sizes, overlap=args.overlap)
     observer = Observer(engine) if args.gate == 'tf' else None
     engine._observer = observer
     params = SamplingParams(temperature=.6, top_k=20, top_p=.95) if args.gate == 'tf' else SamplingParams(temperature=0)
@@ -215,7 +231,7 @@ def workload(args):
                       prefill_chunk_size=128, profile_steps=0, memory_fraction=args.memory_fraction,
                       cuda_graphs=args.cuda_graphs, compile=args.compile,
                       compile_cache_dir=args.compile_cache_dir,
-                      graph_batch_sizes=args.graph_batch_sizes)
+                      graph_batch_sizes=args.graph_batch_sizes, overlap=args.overlap)
     params = SamplingParams(temperature=.6, top_k=20, top_p=.95)
     # Load/warmup excluded; exercise actual maximum-B linear and bounded sampler.
     engine.generate([Request(prompts[i % len(prompts)], 4, i) for i in range(args.batch_size)], params)
@@ -250,12 +266,14 @@ def workload(args):
 
 def swap_check(args):
     """Production-weight forced swap with the same batch composition."""
+    if args.overlap:
+        raise ValueError('overlap forced swap/restart identity is --gate overlap-identity')
     prompts = workload_prompts(args.model_path)[:4]
     override = yaml.safe_load(Path('script/tah/recipes/qwen3_1.7/eval_tah.yaml').read_text())
     engine = TaHEngine(args.model_path, override, max_batch_size=4, kv_capacity=10000,
                       swap_chunk_entries=7, prefill_chunk_size=128, cuda_graphs=args.cuda_graphs,
                       compile=args.compile, compile_cache_dir=args.compile_cache_dir,
-                      graph_batch_sizes=args.graph_batch_sizes)
+                      graph_batch_sizes=args.graph_batch_sizes, overlap=args.overlap)
     params = SamplingParams(temperature=.6, top_k=20, top_p=.95)
     requests = [Request(p, 128, i) for i, p in enumerate(prompts)]
     decisions = []
@@ -292,7 +310,8 @@ def swap_check(args):
     return dict(status='PASS', gate='G-ROBUST forced swap identity', requests=len(requests),
                 output_tokens=sum(len(r.token_ids) for r in actual), checks=checks,
                 run=engine.last_run, kv_audit=engine.pool.audit(), host_swap_used_bytes=engine.swap.used_bytes,
-                decision_rows=len(decisions), decisions_identical=True, memory_budget=engine.memory_budget)
+                decision_rows=len(decisions), decisions_identical=True, memory_budget=engine.memory_budget,
+                results=[asdict(r) for r in actual])
 
 
 def smoke(args):
@@ -302,16 +321,11 @@ def smoke(args):
     engine = TaHEngine(args.model_path, override, max_batch_size=args.batch_size,
                       memory_fraction=args.memory_fraction, cuda_graphs=args.cuda_graphs,
                       compile=args.compile, compile_cache_dir=args.compile_cache_dir,
-                      graph_batch_sizes=args.graph_batch_sizes)
+                      graph_batch_sizes=args.graph_batch_sizes, overlap=args.overlap)
     requests = [Request(p, 1024, i) for i, p in enumerate(prompts)]
     params = SamplingParams(temperature=.6, top_k=20, top_p=.95)
     decisions = []
-    decode = engine._decode
-    def observed(running):
-        status = decode(running)
-        decisions.extend((s.index, s.position, s.depth, bool(row[0])) for s, row in zip(running, status))
-        return status
-    engine._decode = observed
+    record_decisions(engine, decisions)
     engine.cuda_graphs = False
     expected = engine.generate(requests, params)
     eager_run, expected_decisions = engine.last_run, decisions.copy()
@@ -331,6 +345,56 @@ def smoke(args):
         kv_audit=engine.pool.audit(), results=[asdict(r) for r in actual])
 
 
+def overlap_identity(args):
+    """Production overlap vs non-overlap replay of the same per-step row sets.
+
+    24 W-smoke prompts at resident B16 (admissions follow finishes), varied caps
+    (finishes at different steps, EOS enabled), one forced swap and one forced
+    restart. A plain non-overlap run is reported as a composition diagnostic.
+    """
+    from tah.engine.tests.overlap_replay import assert_same_execution, overlap_vs_replay
+    prompts = workload_prompts(args.model_path, repeat=1)[:24]
+    override = yaml.safe_load(Path('script/tah/recipes/qwen3_1.7/eval_tah.yaml').read_text())
+    engine = TaHEngine(args.model_path, override, max_batch_size=16,
+                      memory_fraction=args.memory_fraction, cuda_graphs=args.cuda_graphs,
+                      compile=args.compile, compile_cache_dir=args.compile_cache_dir,
+                      graph_batch_sizes=args.graph_batch_sizes, overlap=True)
+    requests = [Request(p, 256 + 64 * (i % 8), i) for i, p in enumerate(prompts)]
+    params = SamplingParams(temperature=.6, top_k=20, top_p=.95)
+    events = []
+    def hook(engine, running, swapped, free_rows):
+        step = engine.last_run['steps']
+        if step == 40:
+            victim = max(running, key=lambda s: s.index)
+            engine._swap_out(victim, running, swapped, free_rows)
+            events.append(('swap', step, victim.index))
+        elif step == 160:
+            victim = min(running, key=lambda s: len(s.generated))
+            engine._restart(victim, running, swapped, free_rows, engine._restarted)
+            events.append(('restart', step, victim.index))
+    overlap, replay = overlap_vs_replay(engine, requests, params, hook)
+    assert len(events) == 4 and events[:2] == events[2:], events
+    assert_same_execution(overlap, replay)
+    if args.cuda_graphs:
+        assert overlap['run']['graph_steps'] == overlap['run']['steps']
+    engine.overlap = False
+    plain = engine.generate(requests, params)
+    plain_run = engine.last_run
+    engine.overlap = True
+    first = [divergence(a.token_ids, b.token_ids) for a, b in zip(overlap['results'], plain)]
+    return dict(status='PASS', gate='overlap identity vs replayed row sets', requests=len(requests),
+        forced_events=events[:2], steps=len(overlap['rows']), decision_rows=len(overlap['decisions']),
+        output_tokens=sum(len(r.token_ids) for r in overlap['results']),
+        ghost_rows=overlap['run']['ghost_rows'], finish_reasons=sorted({r.finish_reason for r in overlap['results']}),
+        rows_identical=True, decisions_identical=True, tokens_counts_identical=True,
+        decision_sha256=hashlib.sha256(json.dumps(overlap['decisions']).encode()).hexdigest(),
+        overlap_run=overlap['run'], replay_run=replay['run'], plain_nonoverlap_run=plain_run,
+        plain_nonoverlap_first_divergence=first,
+        plain_nonoverlap_identical_requests=sum(d is None for d in first),
+        kv_audit=engine.pool.audit(), host_swap_used_bytes=engine.swap.used_bytes,
+        memory_budget=engine.memory_budget, results=[asdict(r) for r in overlap['results']])
+
+
 def phase_profile(args):
     """Short real admission/prefill and forced swap launch-gap diagnostic."""
     from torch.profiler import record_function
@@ -339,7 +403,7 @@ def phase_profile(args):
     engine = TaHEngine(args.model_path, override, max_batch_size=4, kv_capacity=10000,
                       swap_chunk_entries=256, cuda_graphs=args.cuda_graphs,
                       compile=args.compile, compile_cache_dir=args.compile_cache_dir,
-                      graph_batch_sizes=args.graph_batch_sizes)
+                      graph_batch_sizes=args.graph_batch_sizes, overlap=args.overlap)
     requests = [Request(p, 48, i) for i, p in enumerate(prompts)]
     params = SamplingParams(temperature=.6, top_k=20, top_p=.95)
     timings = dict(prefill=[], swap_out=[], swap_in=[], decode=[])
@@ -477,16 +541,19 @@ def profile(args):
     engine = TaHEngine(args.model_path, override, max_batch_size=args.batch_size,
                       prefill_chunk_size=128, profile_steps=0, admission_headroom=0, cuda_graphs=args.cuda_graphs,
                       compile=args.compile, compile_cache_dir=args.compile_cache_dir,
-                      graph_batch_sizes=args.graph_batch_sizes)
+                      graph_batch_sizes=args.graph_batch_sizes, overlap=args.overlap)
     params = SamplingParams(temperature=.6, top_k=20, top_p=.95)
     requests = [Request(prompts[i % len(prompts)], 12, i) for i in range(args.batch_size)]
     engine.generate(requests, params)
-    original = engine._decode
+    # Overlap: one scope = one pipeline turn (consume lagged status, schedule,
+    # plan+launch). Turns are back to back, so scope wall = step period.
+    step_name = '_overlap_iteration' if engine.overlap else '_decode'
+    original = getattr(engine, step_name)
     from torch.profiler import record_function
-    def decode(running):
+    def decode(*a):
         with record_function('engine_decode_step'):
-            return original(running)
-    engine._decode = decode
+            return original(*a)
+    setattr(engine, step_name, decode)
     # Uninstrumented timing samples provide the step wall envelope before the
     # profiler's CPU instrumentation increases launch overhead.
     engine.profile_steps = 100
@@ -496,21 +563,26 @@ def profile(args):
     started = False
     closed = False
     count = 0
-    def profiled_decode(running):
+    window = []
+    def profiled_decode(*a):
         nonlocal started, closed, count
         # Starting at the first decode avoids recording the large, irrelevant
         # prefill trace (and keeps the profiler's host memory bounded).
+        if engine.overlap and not started and engine.last_run['steps'] < 2:
+            return original(*a)  # overlap: start once the pipeline is primed
         if not started:
             prof.__enter__()
             started = True
-        result = decode(running)
+        if engine.overlap:
+            window.append(engine.last_run['steps'])
+        result = decode(*a)
         count += 1
-        if count == 11:
+        if count == (10 if engine.overlap else 11):  # overlap: steps 2..11, before the 12-token tail
             prof.__exit__(None, None, None)
             closed = True
-            engine._decode = decode
+            setattr(engine, step_name, decode)
         return result
-    engine._decode = profiled_decode
+    setattr(engine, step_name, profiled_decode)
     try:
         engine.generate(requests, params)
     finally:
@@ -536,6 +608,13 @@ def profile(args):
     transfer_us = gpu_us - kernel_us
     wall_us = sum((s.end_ns() - s.start_ns()) / 1000 for s in steps)
     assert 0 < kernel_us <= gpu_us <= wall_us
+    if engine.overlap:
+        # Launch ids of the profiled turns; same deterministic schedule unprofiled.
+        def pick(entries):
+            by_step = {e['step']: dict(e, total_ms=e['iteration_ms']) for e in entries}
+            return [by_step[i] for i in window]
+        unprofiled = pick(unprofiled)
+        engine.last_run['profile'] = pick(engine.last_run['profile'])
     unprofiled = unprofiled[:len(steps)]
     observed = engine.last_run['profile'][:len(steps)]
     assert [p['batch_size'] for p in unprofiled] == [p['batch_size'] for p in observed]
@@ -586,7 +665,10 @@ def profile(args):
         top_gpu_kernels=[dict(name=name, total_gpu_ms=duration / 1000)
             for name, duration in sorted(grouped.items(), key=lambda pair: pair[1], reverse=True)[:20]],
         note='GPU kernel sum is device execution time; stream events include CPU launch gaps. The unprofiled residual uses device durations from an equivalent profiled run and is an estimate. CPU and GPU overlap; residuals are not additive CPU utilization. The profiled residual includes profiler overhead.')
-    if args.cuda_graphs and report['estimated_unprofiled_python_launch_idle_ms'] > 2:
+    if engine.overlap:
+        report['overlap_host_ms'] = {key: statistics.mean(p[key] for p in unprofiled) for key in
+            ('iteration_ms', 'consume_wait_host_ms', 'schedule_host_ms', 'prepare_host_ms', 'launch_host_ms', 'gpu_step_ms')}
+    elif args.cuda_graphs and report['estimated_unprofiled_python_launch_idle_ms'] > 2:
         report['overlap_probe'] = overlap_probe(engine, requests, params)
     return report
 
@@ -601,7 +683,7 @@ def overlap_check(args):
     engine = TaHEngine(args.model_path, override, max_batch_size=args.batch_size,
                       admission_headroom=0, cuda_graphs=True, compile=args.compile,
                       compile_cache_dir=args.compile_cache_dir,
-                      graph_batch_sizes=args.graph_batch_sizes)
+                      graph_batch_sizes=args.graph_batch_sizes, overlap=args.overlap)
     requests = [Request(prompts[i % len(prompts)], 12, i) for i in range(args.batch_size)]
     result = overlap_probe(engine, requests, SamplingParams(temperature=.6, top_k=20, top_p=.95))
     return dict(status='PASS', overlap_probe=result, memory_budget=engine.memory_budget)
@@ -609,7 +691,7 @@ def overlap_check(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--gate', choices=['gen', 'tf', 'smoke', 'perf', 'robust', 'long-prompt', 'swap', 'profile', 'phase-profile', 'overlap'], required=True)
+    parser.add_argument('--gate', choices=['gen', 'tf', 'smoke', 'perf', 'robust', 'long-prompt', 'swap', 'profile', 'phase-profile', 'overlap', 'overlap-identity'], required=True)
     parser.add_argument('--checkpoint', choices=['real', 'mlp3', 'mlp1', 'label3'], default='real')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--batch-size', type=int, default=128)
@@ -622,6 +704,8 @@ def main():
     parser.add_argument('--cuda-graphs', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--compile', action=argparse.BooleanOptionalAction, default=False,
                         help='fuse decode with TorchInductor and reuse its persistent disk cache')
+    parser.add_argument('--overlap', action=argparse.BooleanOptionalAction, default=False,
+                        help='pipelined scheduler: plan step t+1 while step t runs (one-step status lag)')
     parser.add_argument('--compile-cache-dir', type=Path,
                         help='TorchInductor disk cache (default: TORCHINDUCTOR_CACHE_DIR or ~/.cache/torch/inductor)')
     parser.add_argument('--graph-batch-sizes', type=parse_graph_batch_sizes,
@@ -632,9 +716,11 @@ def main():
     report = (parity(args) if args.gate in ('gen', 'tf') else profile(args) if args.gate == 'profile'
               else swap_check(args) if args.gate == 'swap' else smoke(args) if args.gate == 'smoke'
               else overlap_check(args) if args.gate == 'overlap'
+              else overlap_identity(args) if args.gate == 'overlap-identity'
               else phase_profile(args) if args.gate == 'phase-profile' else workload(args))
     report.update(process_seconds=time.perf_counter() - start, device=torch.cuda.get_device_name(), cuda_graphs=args.cuda_graphs,
-        compile=args.compile, compile_cache_dir=str(args.compile_cache_dir) if args.compile_cache_dir else None,
+        compile=args.compile, overlap=args.overlap,
+        compile_cache_dir=str(args.compile_cache_dir) if args.compile_cache_dir else None,
         graph_batch_sizes=args.graph_batch_sizes,
         runtime_sha256={str(p): digest(p) for p in Path('tah/engine').glob('*.py')})
     args.output.parent.mkdir(parents=True, exist_ok=True)

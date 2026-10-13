@@ -3,12 +3,19 @@
 DecodeBucket and step buffers have fixed addresses/shapes for each exact B.
 Admission, slot allocation, descriptor staging and RoPE frequency planning happen
 outside the device-only step. One compact status transfer completes each step.
+
+overlap=True pipelines the host: step t+1 is planned and launched before step
+t's status is read. Per-row position/depth advance lives on the device; the host
+reserves both possible next KV slots and reacts to finishes/admission/swap with
+a one-step lag (see _overlap_iteration).
 """
 from collections import deque
 import json
 import math
+import logging
 from pathlib import Path
 import time
+from types import SimpleNamespace
 
 import torch
 
@@ -16,7 +23,7 @@ from .attention import AttentionRow, DecodeBucket, static_plan_integer_bytes
 from .kv_cache import KVCapacityError, SlotPool
 from .model import EagerTaHModel
 from .sampling import GraphSampler, RequestRNG, SamplingParams
-from .scheduler import HostSwap, Request, Result, State
+from .scheduler import HostSwap, HostSwapOverflow, Request, Result, State
 from .tensors import upload
 from .graphs import DecodeGraphs, batch_sizes
 from .compiled import CompiledDecodeStep, register_attention_plan
@@ -32,6 +39,9 @@ class StepBucket:
         self.positions = engine.step_positions[:size]
         self.depths = engine.step_depths[:size]
         self.slots = engine.step_slots[:size]
+        self.slot_a = engine.step_slot_a[:size]
+        self.slot_b = engine.step_slot_b[:size]
+        self.params_key = None
         self.embeddings = engine.step_embeddings[:size]
         self.logits = engine.step_logits[:size]
         self.rng = RequestRNG(engine.step_seeds[:size], engine.step_counters[:size])
@@ -63,10 +73,28 @@ class StepBucket:
         else:
             self.sampling_buckets[key][1].update(params)
         self.sampler, self.params = self.sampling_buckets[key]
+        self.params_key = (tuple(map(id, params)), params)
+
+    def sampling_cached(self, engine, params):
+        # Overlap mode: skip identical parameter uploads (same objects, same rows).
+        key = self.params_key
+        if key is None or len(key[1]) != len(params) or any(a is not b for a, b in zip(key[1], params)):
+            self.sampling(engine, params)
 
     @torch.inference_mode()
     def run(self, engine, rotary):
         """The device-only step boundary WP7 can capture without rescheduling."""
+        status = self._run(engine, rotary)
+        if engine.overlap:
+            # Device-resident next pass of every row: same token one depth
+            # deeper, or the next position at depth 1 (finished rows become
+            # ghost rows of the next step and are discarded by the host).
+            keep = status[:, 0] > .5
+            engine.row_positions.index_copy_(0, self.rows, torch.where(keep, self.positions, self.positions + 1))
+            engine.row_depths.index_copy_(0, self.rows, torch.where(keep, self.depths + 1, 1))
+        return status
+
+    def _run(self, engine, rotary):
         if engine.compile_enabled:
             return engine.compiled_step.run(self, engine, rotary)
         model = engine.model
@@ -100,7 +128,7 @@ class TaHEngine:
                  swap_chunk_entries=256, max_new_tokens=1024, seed=0,
                  eos_token_id='tokenizer', sampling_topk=128, compile=False,
                  profile_steps=0, cuda_graphs=True, graph_batch_sizes=None,
-                 compile_cache_dir=None):
+                 compile_cache_dir=None, overlap=None):
         if not isinstance(compile, bool):
             raise ValueError('compile must be boolean')
         if compile and torch.device(device).type != 'cuda':
@@ -115,8 +143,16 @@ class TaHEngine:
             raise ValueError('max_new_tokens and profile_steps must be nonnegative integers')
         if not isinstance(cuda_graphs, bool):
             raise ValueError('cuda_graphs must be boolean')
+        if overlap is not None and not isinstance(overlap, bool):
+            raise ValueError('overlap must be None (auto) or boolean')
         self.graph_batch_sizes = batch_sizes(max_batch_size, graph_batch_sizes)
         self.model = EagerTaHModel.from_pretrained(model_path, config_override, device=device)
+        # Auto (None): overlap unless RoPE frequencies depend on the exact
+        # context length, which the lagged host does not know at launch.
+        static_rope = self.model.model.rotary_emb.kind not in ('dynamic', 'longrope')
+        if overlap and not static_rope:
+            raise ValueError('overlap=True requires static RoPE frequencies (not dynamic/longrope); use overlap=False')
+        self.overlap = static_rope if overlap is None else overlap
         self.device = self.model.device
         self.compile_enabled = compile
         self.cuda_graphs = cuda_graphs and self.device.type == 'cuda' and bool(self.graph_batch_sizes)
@@ -159,6 +195,10 @@ class TaHEngine:
         self._busy = False
         self._observer = None
         self._step_hook = None
+        self._resolved_hook = None  # overlap tests: called with each consumed step
+        # Test-only: non-overlap replay of overlap row sets (a finished request
+        # runs one more discarded "ghost" row before release).
+        self._ghost_lag = False
         self.last_run = {}
         probe = None
         if self.cuda_graphs:
@@ -228,7 +268,7 @@ class TaHEngine:
         cfg, b, n = self.model.config, self.max_batch_size, self.model.config['num_hidden_layers']
         v, h = cfg['vocab_size'], cfg['hidden_size']
         self.pool = SlotPool(kv_capacity, n, cfg['num_key_value_heads'], cfg['head_dim'],
-                             self.model.max_iter, device=self.device)
+                             self.model.max_iter, device=self.device, trash_slot=self.overlap)
         self.swap = HostSwap(self.pool, host_swap_bytes, swap_chunk_entries)
         self.decode_workspace = self.prefill_workspace = None
         if self.device.type == 'cuda':
@@ -243,6 +283,9 @@ class TaHEngine:
         self.step_logits, self.step_embeddings = torch.empty_like(self.logits), torch.empty_like(self.embeddings)
         self.step_rows, self.step_positions, self.step_depths, self.step_slots = [empty(b) for _ in range(4)]
         self.step_seeds, self.step_counters = empty(b), empty(b)
+        # Overlap: per-row next pass (device-resident) and both candidate slots.
+        self.row_positions, self.row_depths = empty(b), empty(b)
+        self.step_slot_a, self.step_slot_b = empty(b), empty(b)
         cap = self.pool.capacity
         self.attention_buffers = {name: empty(cap, dtype=dtype) for name, dtype in
             [('source_slots', torch.int32), ('source_pos', torch.long), ('source_depth', torch.int32), ('indices', torch.int32)]}
@@ -292,7 +335,9 @@ class TaHEngine:
     def _prefill(self, state):
         start_time = time.perf_counter()
         state.cache = self.pool.create_request(state.index, context_limit=self.context_limit)
-        state.admitted = start_time
+        state.spec_a = state.inflight = None
+        if not state.admitted:
+            state.admitted = start_time
         self.seeds[state.row] = state.seed
         self.counters[state.row] = 0
         for start in range(0, len(state.prompt), self.prefill_chunk_size):
@@ -306,7 +351,7 @@ class TaHEngine:
             if end == len(state.prompt):
                 self.logits[state.row].copy_(output.logits[-1])
             del output
-        state.prefill_seconds = time.perf_counter() - start_time
+        state.prefill_seconds += time.perf_counter() - start_time
         state.position = len(state.prompt)
         if not state.max_new_tokens:
             return 'length'
@@ -331,19 +376,27 @@ class TaHEngine:
 
     def _finish(self, state, reason, results, callback):
         finished = time.perf_counter()
+        cache, state.cache = state.cache, None
         result = Result(state.index, state.generated.copy(),
             self.tokenizer.decode(state.generated, skip_special_tokens=False) if self.tokenizer else '',
             state.prompt_counts.copy(), state.generated_counts.copy(), reason,
             dict(total_seconds=finished - state.submitted, queue_seconds=state.admitted - state.submitted,
-                 prefill_seconds=state.prefill_seconds, swaps=state.swaps))
-        self.pool.release(state.cache)
-        state.cache = None
+                 prefill_seconds=state.prefill_seconds, swaps=state.swaps,
+                 restarts=state.restarts, wasted_tokens=state.wasted_tokens))
+        if cache is not None:  # an overlap finish can resolve while swapped out
+            self.pool.release(cache)
         results[state.index] = result
         if callback is not None:
             callback(result)
 
     def _swap_out(self, state, running, swapped, free_rows):
         started = time.perf_counter()
+        # Overlap only: drop the unwritten next-position reservation so the
+        # snapshot holds written KV only (no-op without speculation).
+        table = state.cache.streams[0]
+        if table.size and table.host_positions[-1] > state.position:
+            self.pool.pop_last(state.cache, 0, table.host_positions[-1])
+        state.spec_a = None
         self.swap.out(state, self.device_state)
         running.remove(state)
         free_rows.append(state.row)
@@ -356,7 +409,8 @@ class TaHEngine:
         # FIFO, and reserve growth for every resident row before restoration.
         while swapped and free_rows:
             state = swapped[0]
-            needed = sum(map(len, state.snapshot.positions)) + len(running) + 1
+            growth = self._overlap_need(running) if self.overlap else len(running)
+            needed = sum(map(len, state.snapshot.positions)) + growth + 1
             if needed > self.pool.free_slots:
                 break
             state.row = free_rows.pop()
@@ -367,6 +421,47 @@ class TaHEngine:
             running.append(state)
             running.sort(key=lambda s: s.index)
             self.last_run['swap_ins'] += 1
+
+    def _restart(self, state, running, swapped, free_rows, restarted):
+        """Drop an unfinished attempt; keep identity, seed and lifetime counters."""
+        started = time.perf_counter()
+        was_swapped = state.snapshot is not None
+        wasted = len(state.generated)
+        if was_swapped:
+            # An overflow can follow a swap issued in this very preemption
+            # loop. Finish its D2H transfer before dropping the pinned payload
+            # and making its budget available for another snapshot.
+            if state.snapshot.event is not None:
+                state.snapshot.event.synchronize()
+            swapped.remove(state)
+            self.swap.discard(state)
+        else:
+            self.pool.release(state.cache)
+            state.cache = None
+            running.remove(state)
+            for tensor in self.device_state:
+                tensor[state.row].zero_()
+            free_rows.append(state.row)
+        state.row, state.position, state.depth = -1, 0, 1
+        state.spec_a = state.inflight = None
+        state.generated.clear()
+        state.generated_counts.clear()
+        state.prompt_counts.clear()
+        state.restarts += 1
+        state.wasted_tokens += wasted
+        # Oldest retry first. Swapped requests still restore before this queue,
+        # and fresh inputs wait behind it. The oldest resident keeps advancing
+        # while pressure removes newer attempts, guaranteeing finite progress.
+        restarted.append(state)
+        restarted.sort(key=lambda s: s.index)
+        self.last_run['restarts'] += 1
+        self.last_run['wasted_tokens'] += wasted
+        self.last_run['time_seconds']['restart'] += time.perf_counter() - started
+        logging.getLogger(__name__).warning(
+            'Restarting request %d from prompt after host swap overflow: '
+            'seed=%d, discarded_tokens=%d, restarts=%d, source=%s',
+            state.index, state.seed, wasted, state.restarts,
+            'swapped' if was_swapped else 'resident')
 
     @torch.inference_mode()
     def _decode(self, running):
@@ -417,6 +512,254 @@ class TaHEngine:
         self.last_run['steps'] += 1
         return host_status
 
+    # ---- overlap pipeline (overlap=True) ---------------------------------
+    # Invariant: when step t+1 is planned, statuses through t-1 are consumed.
+    # A row in in-flight step t is "uncertain": its host position/depth is its
+    # row in step t, and its next row is either (p, d+1) [slot A, stream d] or
+    # (p+1, 1) [slot B, stream 0], or a discarded ghost if step t finishes it.
+    # Both slots are reserved before launch; the device picks one by the depth
+    # it computed. A is invisible to the (p+1, 1) row and B to (p, d+1), so the
+    # unused one cannot leak into attention; an unused A is released when its
+    # status arrives (before any deeper row at p+1 is planned), an unused B is
+    # kept for the eventual advance. Host frees after a finish/swap/restart are
+    # stream-ordered behind the in-flight step that may still write them.
+
+    def _certain(self, state):
+        return state.inflight is None or state.inflight <= self._consumed_through
+
+    def _reusable_slot(self, state, stream, position):
+        table = state.cache.streams[stream]
+        if table.size and table.host_positions[-1] == position:
+            return table.host_slots[-1]
+        return None
+
+    def _row_need(self, state):
+        if self._certain(state):
+            return self._reusable_slot(state, state.depth - 1, state.position) is None
+        need = state.depth < self.model.max_iter
+        if len(state.generated) + 1 < state.max_new_tokens:
+            need += self._reusable_slot(state, 0, state.position + 1) is None
+        return need
+
+    def _overlap_need(self, running):
+        return sum(self._row_need(state) for state in running)
+
+    def _overlap_drain(self, ctx):
+        # Speculation needs up to two slots per row; a resolved row needs one.
+        while ctx.pending:
+            self._overlap_consume(ctx, ctx.pending.popleft())
+        self.last_run['overlap_drains'] += 1
+
+    @torch.inference_mode()
+    def _overlap_launch(self, running, step):
+        start = time.perf_counter()
+        size = len(running)
+        bucket = self._bucket(size)
+        n, trash = self.model.max_iter, self.pool.trash_slot
+        entries, plan, certain = [], [], []
+        for state in running:
+            if self._certain(state):
+                slot = self._reusable_slot(state, state.depth - 1, state.position)
+                if slot is None:
+                    entries.append((state.cache, state.depth - 1, state.position))
+                    slot = len(entries) - 1
+                else:
+                    slot = ('slot', slot)
+                plan.append((slot, slot))
+                certain.append(state)
+            else:
+                p, d = state.position, state.depth
+                a = b = None
+                if d < n:
+                    entries.append((state.cache, d, p))
+                    a = len(entries) - 1
+                if len(state.generated) + 1 < state.max_new_tokens:
+                    b = self._reusable_slot(state, 0, p + 1)
+                    if b is None:
+                        entries.append((state.cache, 0, p + 1))
+                        b = len(entries) - 1
+                    else:
+                        b = ('slot', b)
+                # else: stopping finishes the request; its ghost writes trash.
+                plan.append((a, b))
+        ids = self.pool.reserve(entries)
+        resolve = lambda x: trash if x is None else x[1] if isinstance(x, tuple) else ids[x]
+        slot_a, slot_b = [], []
+        for state, (a, b) in zip(running, plan):
+            sb = resolve(b)
+            slot_b.append(sb)
+            slot_a.append(sb if a is None else resolve(a))
+            if a is not None and not self._certain(state):
+                state.spec_a = (step, state.depth, state.position)
+        values = ([s.row for s in running] + slot_a + slot_b + [s.row for s in certain]
+                  + [s.position for s in certain] + [s.depth for s in certain])
+        host = upload(values, self.device)  # one H2D for all per-step integers
+        c = len(certain)
+        bucket.rows.copy_(host[:size])
+        bucket.slot_a.copy_(host[size:2 * size])
+        bucket.slot_b.copy_(host[2 * size:3 * size])
+        if c:
+            rows = host[3 * size:3 * size + c]
+            self.row_positions.index_copy_(0, rows, host[3 * size + c:3 * size + 2 * c])
+            self.row_depths.index_copy_(0, rows, host[3 * size + 2 * c:])
+        torch.index_select(self.row_positions, 0, bucket.rows, out=bucket.positions)
+        torch.index_select(self.row_depths, 0, bucket.rows, out=bucket.depths)
+        torch.where(bucket.depths > 1, bucket.slot_a, bucket.slot_b, out=bucket.slots)
+        torch.index_select(self.embeddings, 0, bucket.rows, out=bucket.embeddings)
+        torch.index_select(self.logits, 0, bucket.rows, out=bucket.logits)
+        torch.index_select(self.seeds, 0, bucket.rows, out=bucket.rng.seeds)
+        torch.index_select(self.counters, 0, bucket.rows, out=bucket.rng.counters)
+        bucket.sampling_cached(self, [s.params for s in running])
+        bucket.attention.prepare([AttentionRow(s.cache, s.position, s.depth) for s in running],
+                                 query=(bucket.positions, bucket.depths))
+        rotary = self.model.model.rotary_emb(bucket.embeddings[None], bucket.positions,
+                                             sequence_length=max(s.position for s in running) + 2)
+        planned = time.perf_counter()
+        profiled = self.device.type == 'cuda' and step < self.profile_steps
+        events = None
+        if profiled:
+            events = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
+            events[0].record()
+        status = self.graphs.run(bucket, self, rotary)
+        if profiled:
+            events[1].record()
+        logits = bucket.logits.clone() if self._observer is not None else None
+        if self.device.type == 'cuda':
+            host_status = torch.empty(status.shape, dtype=status.dtype, pin_memory=True)
+            host_status.copy_(status, non_blocking=True)  # lagged; the ONE D2H per step
+            ready = torch.cuda.Event()
+            ready.record()
+        else:
+            host_status, ready = status.clone(), None
+        for state in running:
+            state.inflight = step
+        self.last_run['steps'] += 1
+        return dict(step=step, entries=[(s, s.restarts) for s in running], status=host_status,
+                    event=ready, logits=logits, events=events,
+                    host_ms=dict(prepare_host_ms=(planned - start) * 1000,
+                                 launch_host_ms=(time.perf_counter() - planned) * 1000))
+
+    def _overlap_consume(self, ctx, record):
+        started = time.perf_counter()
+        if record['event'] is not None:
+            record['event'].synchronize()
+        waited = time.perf_counter() - started
+        rows = record['status'].tolist()
+        self._consumed_through = record['step']
+        resolved = []
+        for i, ((state, attempt), (keep, token, raw, probability)) in enumerate(zip(record['entries'], rows)):
+            if state.restarts != attempt or ctx.results[state.index] is not None:
+                # Dropped attempt, or ghost row of a request finished at t-1.
+                self.last_run['ghost_rows'] += ctx.results[state.index] is not None
+                continue
+            resolved.append((i, state.index, state.position, state.depth, bool(keep)))
+            spec, state.spec_a = state.spec_a, None
+            assert spec is None or spec[0] == record['step'] + 1
+            if keep:
+                state.depth += 1
+                continue
+            reason = self._sampled(state, int(token), state.depth)
+            if reason:
+                if state.cache is None:  # swapped out during the lag
+                    if state.snapshot.event is not None:
+                        state.snapshot.event.synchronize()
+                    ctx.swapped.remove(state)
+                    self.swap.discard(state)
+                    self._finish(state, reason, ctx.results, ctx.callback)
+                else:
+                    self._finish(state, reason, ctx.results, ctx.callback)
+                    ctx.running.remove(state)
+                    ctx.free_rows.append(state.row)
+                continue
+            if spec is not None:
+                self.pool.pop_last(state.cache, spec[1], spec[2])  # unused deeper slot
+            state.depth = 1
+            state.position += 1
+        if self._observer is not None and resolved:
+            index = [r[0] for r in resolved]
+            states = [SimpleNamespace(index=r[1], position=r[2], depth=r[3]) for r in resolved]
+            self._observer.decode(states, SimpleNamespace(logits=record['logits'][index]),
+                                  record['status'][index])
+        if self._resolved_hook is not None:
+            self._resolved_hook(record, resolved)
+        if record['events'] is not None:
+            events = record['events']
+            self.last_run['profile'].append(dict(batch_size=len(rows), step=record['step'],
+                gpu_step_ms=events[0].elapsed_time(events[1]), consume_wait_host_ms=waited * 1000,
+                **record['host_ms']))
+        return waited
+
+    def _overlap_iteration(self, ctx):
+        """One pipeline turn: consume lagged status, schedule, launch next step."""
+        iteration_started = time.perf_counter()
+        waiting, swapped, running, restarted = ctx.waiting, ctx.swapped, ctx.running, ctx.restarted
+        free_rows, pending = ctx.free_rows, ctx.pending
+        waited = 0.
+        while len(pending) > 1 or (pending and not running):
+            waited += self._overlap_consume(ctx, pending.popleft())
+        consumed = time.perf_counter()
+        self.last_run['time_seconds']['decode'] += consumed - iteration_started
+        self._restore(running, swapped, free_rows)
+        if swapped and (waiting or restarted):
+            self.last_run['blocked_admission_steps'] += 1
+        if restarted and waiting:
+            self.last_run['blocked_restart_admission_steps'] += 1
+        while (waiting or restarted) and not swapped and free_rows:
+            queue = restarted if restarted else waiting
+            state = queue[0]
+            bound = len(state.prompt) * self.model.max_iter
+            reserve = math.ceil(self.pool.capacity * self.admission_headroom) + self._overlap_need(running) + 1
+            if self.pool.free_slots < bound + reserve:
+                break
+            if queue is restarted:
+                queue.pop(0)
+            else:
+                queue.popleft()
+            state.row = free_rows.pop()
+            phase_started = time.perf_counter()
+            reason = self._prefill(state)
+            self.last_run['time_seconds']['prefill'] += time.perf_counter() - phase_started
+            if reason:
+                self._finish(state, reason, ctx.results, ctx.callback)
+                free_rows.append(state.row)
+            else:
+                running.append(state)
+        if not running:
+            if pending:
+                return True
+            if not waiting and not swapped and not restarted:
+                return False
+            raise KVCapacityError('scheduler cannot make progress: request cannot fit KV pool')
+        if self._step_hook is not None:
+            self._step_hook(self, running, swapped, free_rows)
+            if not running:
+                return True
+        for state in running:
+            if state.cache.size + self._row_need(state) > self.pool.capacity:
+                if pending:
+                    self._overlap_drain(ctx)
+                    return True
+                raise KVCapacityError('request cannot fit KV pool alone at its next pass')
+        while self._overlap_need(running) > self.pool.free_slots:
+            if len(running) == 1:
+                if pending:
+                    self._overlap_drain(ctx)
+                    return True
+                raise KVCapacityError('request cannot fit KV pool alone at its next pass')
+            victim = max(running, key=lambda s: s.index)
+            try:
+                self._swap_out(victim, running, swapped, free_rows)
+            except HostSwapOverflow:
+                newest = max((*running, *swapped), key=lambda s: s.index)
+                self._restart(newest, running, swapped, free_rows, restarted)
+        launch_started = time.perf_counter()
+        record = self._overlap_launch(running, self.last_run['steps'])
+        record['host_ms'].update(iteration_ms=(time.perf_counter() - iteration_started) * 1000,
+                                 schedule_host_ms=(launch_started - consumed) * 1000)
+        pending.append(record)
+        self.last_run['time_seconds']['decode'] += time.perf_counter() - launch_started
+        return True
+
     @torch.inference_mode()
     def generate(self, requests, sampling=None, on_result=None):
         """Generate results in input order; callback receives each Result on finish.
@@ -429,29 +772,46 @@ class TaHEngine:
             raise RuntimeError('TaHEngine.generate is not reentrant')
         states = self._requests(list(requests), sampling or SamplingParams())
         self._busy = True
-        waiting, swapped, running = deque(states), deque(), []
+        waiting, swapped, running, restarted = deque(states), deque(), [], []
         free_rows = list(range(self.max_batch_size - 1, -1, -1))
         results = [None] * len(states)
+        lagged = self._lagged = {}
+        self._restarted = restarted  # test hooks may force a restart
         started = time.perf_counter()
         self.last_run = dict(steps=0, graph_steps=0, eager_steps=0, swap_outs=0, swap_ins=0,
-                             blocked_admission_steps=0, profile=[],
+                             blocked_admission_steps=0, blocked_restart_admission_steps=0,
+                             restarts=0, wasted_tokens=0, profile=[],
+                             overlap=self.overlap, overlap_drains=0, ghost_rows=0,
                              compile=dict(enabled=self.compile_enabled,
                                 cache_dir=self.compiled_step.cache_dir if self.compiled_step else None,
                                 seconds=self.compiled_step.compile_seconds if self.compiled_step else 0.,
                                 graphs=self.compiled_step.compile_graphs if self.compiled_step else 0),
-                             time_seconds=dict(decode=0., prefill=0., swap=0., host=0.))
+                             time_seconds=dict(decode=0., prefill=0., swap=0., restart=0., host=0.))
         try:
-            while waiting or swapped or running:
+            if self.overlap:
+                ctx = SimpleNamespace(waiting=waiting, swapped=swapped, running=running,
+                    restarted=restarted, free_rows=free_rows, results=results,
+                    callback=on_result, pending=deque())
+                self._consumed_through = -1
+                while self._overlap_iteration(ctx):
+                    pass
+            while waiting or swapped or running or restarted:
                 self._restore(running, swapped, free_rows)
-                if swapped and waiting:
+                if swapped and (waiting or restarted):
                     self.last_run['blocked_admission_steps'] += 1
-                while waiting and not swapped and free_rows:
-                    state = waiting[0]
+                if restarted and waiting:
+                    self.last_run['blocked_restart_admission_steps'] += 1
+                while (waiting or restarted) and not swapped and free_rows:
+                    queue = restarted if restarted else waiting
+                    state = queue[0]
                     bound = len(state.prompt) * self.model.max_iter
                     reserve = math.ceil(self.pool.capacity * self.admission_headroom) + len(running)
                     if self.pool.free_slots < bound + reserve:
                         break
-                    waiting.popleft()
+                    if queue is restarted:
+                        queue.pop(0)
+                    else:
+                        queue.popleft()
                     state.row = free_rows.pop()
                     phase_started = time.perf_counter()
                     reason = self._prefill(state)
@@ -462,7 +822,7 @@ class TaHEngine:
                     else:
                         running.append(state)
                 if not running:
-                    if not waiting and not swapped:
+                    if not waiting and not swapped and not restarted:
                         break
                     raise KVCapacityError('scheduler cannot make progress: request cannot fit KV pool')
                 if self._step_hook is not None:
@@ -475,16 +835,30 @@ class TaHEngine:
                     victim = max(running, key=lambda s: s.index)
                     if len(running) == 1:
                         raise KVCapacityError('request cannot fit KV pool alone at its next pass')
-                    self._swap_out(victim, running, swapped, free_rows)
+                    try:
+                        self._swap_out(victim, running, swapped, free_rows)
+                    except HostSwapOverflow:
+                        newest = max((*running, *swapped), key=lambda s: s.index)
+                        self._restart(newest, running, swapped, free_rows, restarted)
                 phase_started = time.perf_counter()
                 status = self._decode(running)
                 self.last_run['time_seconds']['decode'] += time.perf_counter() - phase_started
                 for state, (keep, token, raw, probability) in zip(running.copy(), status):
+                    if state.index in lagged:  # test-only ghost row
+                        self._finish(state, lagged.pop(state.index), results, on_result)
+                        running.remove(state)
+                        free_rows.append(state.row)
+                        self.last_run['ghost_rows'] += 1
+                        continue
                     if keep:
                         state.depth += 1
                     else:
                         reason = self._sampled(state, int(token), state.depth)
-                        if reason:
+                        if reason and self._ghost_lag:
+                            lagged[state.index] = reason
+                            state.depth = 1
+                            state.position += 1
+                        elif reason:
                             self._finish(state, reason, results, on_result)
                             running.remove(state)
                             free_rows.append(state.row)
@@ -493,7 +867,8 @@ class TaHEngine:
                             state.position += 1
             self.last_run.update(wall_seconds=time.perf_counter() - started,
                 generated_tokens=sum(len(r.token_ids) for r in results),
-                host_swap_peak_bytes=self.swap.peak_bytes)
+                host_swap_peak_bytes=self.swap.peak_bytes, free_rows=len(free_rows))
+            assert len(free_rows) == len(set(free_rows)) == self.max_batch_size
             if self.compiled_step is not None:
                 self.last_run['compile'] = dict(enabled=True, cache_dir=self.compiled_step.cache_dir,
                     seconds=self.compiled_step.compile_seconds, graphs=self.compiled_step.compile_graphs)
