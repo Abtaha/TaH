@@ -1,8 +1,8 @@
 # TaH evaluation
 
 The entrypoint is `script/tah/evaluation/eval.py`. From the repository root,
-activate `.venv-tah` with the `tah,evaluation,engine` extras installed. CLI help is
-safe while another process owns the GPU:
+activate `.venv-tah` with the `tah`, `evaluation` and `engine` extras installed
+([installation](installation.md)). Help runs without a GPU:
 
 ```bash
 export CUDA_VISIBLE_DEVICES=""
@@ -10,105 +10,93 @@ source .venv-tah/bin/activate
 python script/tah/evaluation/eval.py --help
 ```
 
-The generation examples below are **GPU jobs**; run them only when the selected
-GPU is available. `CUDA_VISIBLE_DEVICES=0` explicitly selects GPU 0 even if the
-shell previously hid GPUs. The full driver is not a CPU-only command.
+Evaluation commands below are GPU jobs. `CUDA_VISIBLE_DEVICES=0` selects GPU 0
+explicitly, even if the shell hid GPUs earlier.
 
-## Run a small TaH evaluation
+## Quick start
 
-Create a local smoke config from the shipped 1.7B recipe, with smaller batches
-and generation cap, then evaluate the first five GSM8K problems:
+This creates a smoke config from the 1.7B recipe with batch 1, one repeat and a
+512-token cap, then evaluates the first five GSM8K problems:
 
 ```bash
 source .venv-tah/bin/activate
+mkdir -p data/eval_configs
 python - <<'PY'
 from pathlib import Path
 import yaml
 cfg = yaml.safe_load(Path('script/tah/recipes/qwen3_1.7/eval_tah.yaml').read_text())
 cfg.update(batch_size=1, repeat_size=1, max_new_tokens=512)
-Path('/tmp/tah_eval_smoke.yaml').write_text(yaml.safe_dump(cfg, sort_keys=False))
+Path('data/eval_configs/smoke.yaml').write_text(yaml.safe_dump(cfg, sort_keys=False))
 PY
 CUDA_VISIBLE_DEVICES=0 python script/tah/evaluation/eval.py \
-  --eval_config /tmp/tah_eval_smoke.yaml \
+  --eval_config data/eval_configs/smoke.yaml \
   --model_path nics-efc/TaH-plus-1.7B \
   --dataset_name gsm8k --backend tah_engine \
   --job_nums 1 --tp_size_per_job 1 --data_range 5 \
   --output_dir data/eval_smoke
 ```
 
-`--model_path` accepts a local checkpoint directory or a Hub ID. A Hub ID may
-download on first use. The 0.6B recipe is
-`script/tah/recipes/qwen3_0.6/eval_tah.yaml`; use it only with a compatible 0.6B
-checkpoint. The shipped recipes use **repeat 1**, batch 16, max_new_tokens 4096,
-temperature 0.6, top_p 0.95, top_k 20, min_p 0, max_iter 2, threshold 0.9.
-For the reference backend (`--backend tah`), batch 16 is not guaranteed to fit long prompts on a 24 GB GPU. The reference
-backend left-pads each batch and can allocate large prompt × batch × vocabulary
-buffers; reducing batch size is the main available memory control.
+`--model_path` takes a local checkpoint directory or a Hub ID (downloaded on first use).
+Recipes: [`qwen3_1.7/eval_tah.yaml`](../script/tah/recipes/qwen3_1.7/eval_tah.yaml)
+and [`qwen3_0.6/eval_tah.yaml`](../script/tah/recipes/qwen3_0.6/eval_tah.yaml); use
+the 0.6B recipe only with a compatible 0.6B checkpoint. Both use one repeat, batch
+16, a 4096-token cap, temperature 0.6, top_p 0.95, top_k 20, min_p 0, `max_iter` 2
+and decider threshold 0.9.
 
 ## Backends
 
 | `--backend` | Behavior |
 | --- | --- |
-| `tah_engine` (default, recommended for TaH v1) | Engine-owned BF16 Qwen3/LoRA/decider execution on one GPU, bounded ragged prefill, continuous batching, CUDA graphs and pinned host swap. Receives every job prompt once, writes each completion incrementally, and returns exact generated-token pass counts. |
-| `tah` | Correctness reference `TaHForCausalLM` and its iteration-aware generation helper. Loads TaH config/LoRA/decider, uses SDPA, returns generated-token pass statistics. Uses `device_map="auto"`; no SGLang engine is involved. |
-| `hf` | Standard `AutoModelForCausalLM.generate`, useful for ordinary base-model baselines. Uses `device_map="auto"`, `trust_remote_code=True`, optional FlashAttention 2. Does not reproduce the TaH selective-iteration wrapper or supply pass counts. |
-| `sglang` | `sglang.Engine` with configured dtype, TP size, memory fraction, attention backend, and sampling. Use checkpoints supported by SGLang; this adapter does not load the TaH reference wrapper/decider and does not supply pass counts. |
+| `tah_engine` (default) | TaH v1 engine on one GPU: continuous batching, CUDA graphs and host swap. Returns exact generated-token pass counts. See [engine](engine.md). |
+| `tah` | Correctness reference: `TaHForCasualLM_generate` on the intact model, SDPA attention, `device_map="auto"`. Returns pass counts. |
+| `hf` | Standard `AutoModelForCausalLM.generate`, for ordinary base-model baselines. No TaH wrapper and no pass counts. |
+| `sglang` | `sglang.Engine` with TP, dtype and memory settings. For SGLang-supported checkpoints; no TaH wrapper and no pass counts. |
 
-Use `--backend tah` to run the intact reference model and `TaHForCasualLM_generate`.
-Both TaH backends read the same sampling and model overrides from eval YAML.
-If engine prerequisites fail, the error points to `--backend tah`. See
-[engine options](engine.md#generate-with-the-engine).
-HF and SGLang perform a throwaway 100-token generation warmup; the `tah`
-adapter does not call that warmup helper. Each job loads one backend for its
-assigned problems across all requested datasets, then cleans it up.
+`tah_engine` receives every prompt of its job once and keeps one engine for all
+datasets in the job. `hf` and `sglang` run a 100-token warmup; `tah` does not.
+Each job loads one backend for its problems across all datasets. The `tah` reference left-pads
+each batch and can allocate large prompt × batch × vocabulary buffers, so on a
+24 GB GPU lower `batch_size` if it runs out of memory.
 
 ## Datasets
 
 Names must appear in
 [`dataset_configs.json`](../tah/evaluate/eval_configs/dataset_configs.json).
-Hub datasets load through `datasets`; local paths are relative to the repo
-root and must already exist. A missing requested split falls back to `train`,
-then `test`. All supported benchmarks have a registered grader.
+Hub datasets load through `datasets`; local paths are relative to the repo root.
+A missing requested split falls back to `train`, then `test`.
 
 | Name | Source | Configured split | Scoring |
 | --- | --- | --- | --- |
 | `aime25` | `yentinglin/aime_2025` | `train` | Expression accuracy |
-| `aime24` | `Maxwell-Jia/AIME_2024` | `test` (default; fallback if absent) | Expression accuracy |
+| `aime24` | `Maxwell-Jia/AIME_2024` | `test` | Expression accuracy |
 | `gsm8k` | `pss0204/gsm8k_test`, subset `gsm8k_test` | `test` | Expression accuracy |
 | `math500` | `HuggingFaceH4/MATH-500` | `test` | LaTeX/math accuracy |
 | `amc23` | `math-ai/amc23` | `test` | LaTeX/math accuracy |
 | `olympiadbench` | `realtreetune/olympiadbench` | `test` | LaTeX/math accuracy |
-| `minerva` | `data/initial_data/eval/minerva.jsonl` | `test` default; JSON loader falls back to `train` | LaTeX/math accuracy |
-| `gpqa` | `data/initial_data/eval/gpqa_diamond.jsonl` | Same local-JSON fallback | String/multiple-choice accuracy |
-| `arc_e` | `data/initial_data/eval/arc_e.jsonl` | Same local-JSON fallback | String/multiple-choice accuracy |
-| `arc_c` | `data/initial_data/eval/arc_c.jsonl` | Same local-JSON fallback | String/multiple-choice accuracy |
-| `mmlu_stem` | `data/initial_data/eval/mmlu_stem.jsonl` | Same local-JSON fallback | String/multiple-choice accuracy |
-| `mmlu_redux` | `data/initial_data/eval/mmlu_redux.jsonl` | Same local-JSON fallback | String/multiple-choice accuracy |
-| `humaneval` | `data/initial_data/eval/humaneval.jsonl` | Local rows in `train` | EvalPlus base and plus pass@k |
-| `mbpp` | `data/initial_data/eval/mbpp.jsonl` | Local rows in `train` | EvalPlus base and plus pass@k |
-| `livecodebench` | Registered source `livecodebench/code_generation_lite`, version `v5` | — | **Unsupported**: no repository grader; rejected before loading. |
+| `minerva` | `data/initial_data/eval/minerva.jsonl` | `test` | LaTeX/math accuracy |
+| `gpqa` | `data/initial_data/eval/gpqa_diamond.jsonl` | local JSON | Multiple-choice accuracy |
+| `arc_e`, `arc_c` | `data/initial_data/eval/arc_{e,c}.jsonl` | local JSON | Multiple-choice accuracy |
+| `mmlu_stem`, `mmlu_redux` | `data/initial_data/eval/*.jsonl` | local JSON | Multiple-choice accuracy |
+| `humaneval`, `mbpp` | `data/initial_data/eval/{humaneval,mbpp}.jsonl` | local rows in `train` | EvalPlus base and plus pass@k |
+| `livecodebench` | Registered only | — | **Unsupported**: rejected before loading |
 
-`brumo25` and `chmath` have math grader entries but no dataset registry entries,
-so they are not selectable. Unknown names and duplicate requested names fail.
-LiveCodeBench cannot be evaluated by applying HumanEval/MBPP tests.
+`brumo25` and `chmath` have math grader entries but no dataset entries, so they
+cannot be selected. Unknown or duplicate names fail. LiveCodeBench cannot be
+scored by HumanEval/MBPP tests.
 
-Math/expression prompts use the tokenizer's user chat template with a generation
-prompt. The graders parse/verify model answers using `math_verify`; unextracted
-answers are incorrect. Code prompts prime a self-contained Python script in a
-markdown code block (`reasoning=False`); outputs are sanitized using each task's
-`entry_point`. If a code tokenizer has no chat template, the task prompt is used
-directly. Each dataset is scored by its own grader.
+Math prompts use the tokenizer's user chat template with a generation prompt;
+unextracted answers are incorrect. Code prompts ask for a self-contained Python
+script in a markdown block; outputs are sanitized using each task's entry point.
+If a code tokenizer has no chat template, the task prompt is used directly.
 
-## Multi-dataset sessions, ranges, and repeats
+## Selecting rows and repeats
 
-Use comma-separated `--dataset_name` to share backend loading across benchmarks.
-This example evaluates Math500 rows `[0,8)` and all GPQA rows, with the smoke
-config prepared above:
+Use comma-separated `--dataset_name` to share one backend load across datasets:
 
 ```bash
 source .venv-tah/bin/activate
 CUDA_VISIBLE_DEVICES=0 python script/tah/evaluation/eval.py \
-  --eval_config /tmp/tah_eval_smoke.yaml \
+  --eval_config data/eval_configs/smoke.yaml \
   --model_path nics-efc/TaH-plus-1.7B \
   --dataset_name math500,gpqa --backend tah_engine \
   --dataset_ranges math500=0:8,gpqa=all \
@@ -116,427 +104,236 @@ CUDA_VISIBLE_DEVICES=0 python script/tah/evaluation/eval.py \
   --output_dir data/eval_multi
 ```
 
-Selection operates on each dataset's loaded row order, before job sharding:
+Selection works on each dataset's loaded row order, before job sharding:
 
-- `--data_range 8` selects `[0,8)` **in each dataset**.
-- `--data_range 8 16` selects `[8,16)` in each dataset; end is exclusive and
-  clamped to dataset length. Start must be nonnegative and end must exceed start.
-- `--dataset_ranges math500=0:8,gpqa=all` overrides the shared range for those
+- `--data_range 8` selects `[0,8)` **in each dataset**; `--data_range 8 16` selects
+  `[8,16)`. The end is exclusive and clamped to the dataset length.
+- `--dataset_ranges math500=0:8,gpqa=all` overrides the shared range for the named
   datasets. Unlisted datasets use `--data_range`, or all rows if it is absent.
-  Names must be requested; repeated names or malformed ranges fail.
-- `--data_ids gsm8k_0,gsm8k_5` overrides both range selections. IDs are
-  `<dataset>_<original_id>`; if a source has no ID, its loaded row index is used.
-  Duplicate IDs are removed and unmatched IDs silently skipped; no matches is
-  an error. Range syntax is still parsed/validated before ID selection.
-  HumanEval source IDs contain a slash, e.g. `humaneval_HumanEval/0`.
+- `--data_ids gsm8k_0,gsm8k_5` overrides both. IDs are `<dataset>_<original_id>`;
+  unmatched IDs are skipped, and no match is an error. HumanEval IDs contain a
+  slash: `humaneval_HumanEval/0`.
 
-YAML `repeat_size` creates that many samples per problem, indexed
+YAML `repeat_size` produces that many samples per problem, indexed
 `0..repeat_size-1`. Repeats are adjacent prompts, so `batch_size` counts
-**samples**, not problems. Use positive integers for both values; there is no
-comprehensive YAML schema validation. Greedy repeats can be identical.
+**samples**, not problems. Greedy repeats are identical. Each problem's repeats
+stay in one job; problems are distributed round-robin across `--job_nums`.
 
-Selected problems are distributed round-robin across jobs; all repeats of a
-problem stay in its job. The current list-returning backends batch by dataset
-within that job and flush completed results after each returned batch. The
-harness also supports callback backends: they receive all job prompts once and
-persist each indexed result as callbacks arrive (possibly out of order), with
-duplicate/out-of-range/missing callbacks treated as errors. `tah_engine` uses this callback mode and keeps one engine for all datasets
-in its job, including startup captures. Math grading can run in processes while
-generation continues; raw outputs are persisted before grading, and CSV rows
-are flushed as grades finish.
+## CLI options
 
-## Every evaluation CLI option
-
-| Flag | Default / required | What happens |
+| Flag | Default | Effect |
 | --- | --- | --- |
-| `-h`, `--help` | — | Print help and exit before running evaluation. |
-| `--eval_config PATH` | Required | Load a YAML mapping; copy the original YAML into every dataset run directory. |
-| `--model_path PATH_OR_ID` | Required | Model and tokenizer checkpoint path or Hub ID. |
-| `--backend {sglang,hf,tah,tah_engine}` | `tah_engine` | Select one of the implementations above. |
-| `--engine-options JSON` | None | JSON object merged over YAML `engine`; keys are all constructor options in [engine.md](engine.md). |
-| `--engine-max-batch-size INT` | None | Override `engine.max_batch_size`, the maximum resident requests (engine default 64). |
-| `--engine-host-swap-gib FLOAT` | None | Override `engine.host_swap_bytes` in GiB (engine default 8). |
-| `--engine-memory-fraction FLOAT` | None | Override `engine.memory_fraction` (engine default .9). |
-| `--max-new-tokens INT` | None | Override top-level YAML `max_new_tokens` for all backends and requests. |
-| `--grading-workers INT` | None | Override YAML `grading_workers`; 0 grades inline, positive counts grade in CPU processes. Engine default 4, other backends 0. |
-| `--dataset_name NAMES` | Required | One name or comma-separated names; whitespace is trimmed. |
-| `--job_nums INT` | `1` | Parallel worker/model instances; jobs with no assigned problems are skipped. Use a positive count. |
-| `--tp_size_per_job INT` | `1` | GPUs assigned to each worker. SGLang uses actual tensor parallelism; HF/TaH ignore this as a TP parameter and use auto device placement within their visible GPUs. Use a positive count. |
-| `--output_dir PATH` | `<model_path>/eval_results` | Parent for dataset/backend/timestamp folders; explicit paths also work for Hub IDs. |
-| `--data_range END` or `--data_range START END` | All rows | Shared per-dataset slice, end exclusive. Other argument counts fail. |
-| `--dataset_ranges SPECS` | None | Per-dataset `name=start:end` or `name=all` overrides, comma-separated. |
-| `--data_ids IDS` | None | Specific standardized IDs, comma-separated; overrides row selection as described above. |
-| `--del_job_dir VALUE` | `True` | Delete `job_<id>/` after all workers and coverage checks succeed. Uses argparse `type=bool`: **any nonempty string, including `False` or `0`, is true**. To retain successful worker directories from this CLI, use `--del_job_dir ''` (empty argument). Failed runs preserve them regardless. |
-| `--logger_level LEVEL` | `WARNING` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`, case-insensitive. Unknown values fall back to WARNING; progress/print output still appears. |
-| `--random_seed INT` | `42` | Same seed in every worker for Python, NumPy, torch and CUDA; engine request seeds are the base seed plus the job prompt index; job IDs do not offset it. Batch composition, backend and sharding can change outputs despite the same seed. |
+| `--eval_config PATH` | required | Flat YAML mapping. A copy is saved in each dataset run directory. |
+| `--model_path PATH_OR_ID` | required | Local checkpoint directory or Hub ID. |
+| `--backend {tah_engine,tah,hf,sglang}` | `tah_engine` | Implementation; see [backends](#backends). |
+| `--dataset_name NAMES` | required | One or more comma-separated names. |
+| `--engine-options JSON` | none | JSON object merged over the YAML `engine` mapping; keys are the [engine options](engine.md#engine-options). |
+| `--engine-max-batch-size INT` | none | Overrides `engine.max_batch_size`. |
+| `--engine-host-swap-gib FLOAT` | none | Overrides `engine.host_swap_bytes` in GiB (default 8). |
+| `--engine-memory-fraction FLOAT` | none | Overrides `engine.memory_fraction` (default 0.9). |
+| `--max-new-tokens INT` | none | Overrides the YAML cap for every request. |
+| `--grading-workers INT` | none | Overrides YAML `grading_workers`; 0 grades inline. |
+| `--job_nums INT` | 1 | Parallel workers, each with its own model instance. Jobs without problems are skipped. |
+| `--tp_size_per_job INT` | 1 | GPUs per worker. `tah_engine` requires 1. |
+| `--output_dir PATH` | `<model_path>/eval_results` | Parent of the dataset/backend/timestamp directories. Prefer an explicit path, especially for Hub IDs. |
+| `--data_range END` or `--data_range START END` | all rows | Per-dataset slice; end exclusive. |
+| `--dataset_ranges SPECS` | none | Per-dataset `name=start:end` or `name=all` overrides. |
+| `--data_ids IDS` | none | Standardized IDs; overrides ranges. |
+| `--del_job_dir VALUE` | `True` | Delete `job_<id>/` after success. The value is parsed with `bool()`: **any nonempty string is true**, including `False`. Use `--del_job_dir ''` to keep them. Failed runs keep them. |
+| `--logger_level LEVEL` | `WARNING` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`. |
+| `--random_seed INT` | 42 | Seed set in every worker (Python, NumPy, torch, CUDA). Batch composition, backend and sharding can still change outputs. |
 
-## Evaluation YAML keys
+## YAML keys
 
-The driver reads a flat mapping. It does not read dataset lists, model paths,
-job counts, output roots, or seeds from YAML: set those via CLI. Unknown keys
-are generally unused; misspelled required keys can produce a worker `KeyError`.
-TaH additionally forwards all recognized `TaHConfig` fields below.
+The driver reads a flat mapping. Model path, datasets, job counts, output roots and
+the seed come from the CLI, not YAML. Unknown keys are ignored, but a misspelled
+required key causes a worker `KeyError`.
 
-| Key | Used by | Default / effect |
+| Key | Backends | Notes |
 | --- | --- | --- |
-| `temperature` | All | Required. Sampling temperature; `tah`/`hf` sample iff >0, otherwise greedy. SGLang receives the value directly. Use 0 for greedy, positive for sampling. |
-| `top_p` | All | Required. Nucleus mass threshold; reference range [0,1], where 0 keeps one maximal token and 1 disables nucleus filtering. HF/SGLang enforce their own accepted range. |
-| `top_k` | All | TaH defaults to 0 (disabled); HF/SGLang omit it if absent/null and use their own defaults. For TaH supply a nonnegative integer; positive k clamps to vocabulary size and retains cutoff ties. Do not pass null to TaH. |
-| `min_p` | All | TaH defaults to 0 (disabled); HF/SGLang omit it if absent/null. Reference keeps probabilities >= min_p × maximum probability. Use [0,1]; do not pass null to TaH. |
-| `max_new_tokens` | All | Required. Generation cap per sample; EOS can stop earlier. Use a positive integer. |
-| `batch_size` | Reference/HF/SGLang | Required by the harness. Samples per fixed batch; engine resident cap is `engine.max_batch_size` and defaults to 64 independently of this key. |
-| `repeat_size` | Harness | Required. Samples per selected problem; positive integer. |
-| `dtype` | All | `bfloat16`. HF/TaH look up `torch.<name>`; SGLang receives the string. The engine requires `bfloat16`. Other backends use a dtype the model/GPU supports (e.g. `bfloat16`, `float16`, `float32` for torch). |
-| `mem_fraction_static` | SGLang | `0.90` (recipes: 0.8). Static-memory fraction passed to SGLang; **ignored by HF/TaH**, so lowering it will not fix reference OOM. |
-| `attention_backend` | SGLang | `triton`. Forwarded to SGLang; availability is determined by the installed SGLang version. |
-| `engine` | `tah_engine` | Optional nested mapping of all `TaHEngine` constructor options; see below. Unknown options fail. |
-| `grading_workers` | Harness | Nonnegative process count; default 4 for engine, 0 for others. Code test execution already uses the EvalPlus process pool. |
-| `use_flash_attention` | HF | False if absent. Truthy value selects `flash_attention_2` and requires flash-attn. Ignored by TaH (always SDPA) and SGLang. Use YAML booleans, not quoted strings. |
+| `temperature` | all | Required. 0 is greedy; positive values sample (`tah`, `hf`, `tah_engine`). |
+| `top_p` | all | Required. Nucleus mass in [0,1]; 1 disables it. |
+| `top_k` | all | `tah`/`tah_engine`: 0 disables (default); positive values keep cutoff ties. Do not pass null. `hf`/`sglang`: omit to use their defaults. |
+| `min_p` | all | Keeps tokens with probability ≥ `min_p` × maximum probability. 0 disables. Do not pass null to TaH. |
+| `max_new_tokens` | all | Required. Generation cap per sample; EOS can stop earlier. |
+| `batch_size` | `tah`, `hf`, `sglang` | Required. Samples per fixed batch. The engine ignores it; use `engine.max_batch_size`. |
+| `repeat_size` | all | Required. Samples per selected problem. |
+| `dtype` | all | `bfloat16` (the engine requires it). `tah` and `hf` look up `torch.<name>`. |
+| `grading_workers` | all | Grading processes. Default 4 for `tah_engine`, 0 otherwise. 0 grades inside the callback. |
+| `engine` | `tah_engine` | Mapping of engine constructor options; see [engine settings](#engine-settings). |
+| `use_flash_attention` | `hf` | `true` selects `flash_attention_2`; needs flash-attn. Ignored by TaH and SGLang. |
+| `mem_fraction_static`, `attention_backend` | `sglang` | Forwarded to SGLang. `mem_fraction_static` is ignored by `hf` and `tah`, so lowering it does not fix reference OOM. |
 
-Reference sampling order is temperature → softmax → min-p/renormalize →
-top-k/renormalize → top-p/renormalize → multinomial. Top-p keeps the first token
-that crosses the mass threshold, and at least one token. Greedy uses argmax
-and ignores these filters. HF and SGLang use their own sampling implementations;
-these settings do not guarantee identical tokens across backends.
-Sampling is shared across requests; the driver derives `do_sample` from
-temperature. Stop strings and individual request seeds are not CLI options.
-Engine memory, graph and compile options are accepted through `engine`.
+Reference sampling order is temperature → softmax → min-p → top-k → top-p →
+multinomial. Top-p keeps at least one token. Greedy uses argmax and ignores the
+filters. HF and SGLang use their own sampling, so tokens are not expected to match
+across backends.
 
-### TaH model override keys
+### TaH model overrides
 
-Both `tah` and `tah_engine` consume these keys, defined in
-[`TaHConfig`](../tah/model/tah_config.py). The saved `tah_config.json` is the
-starting point. The adapter constructs a `TaHConfig` from recognized YAML
-fields; non-None and nonempty-dict values replace saved fields, **without
-recursive dict merging**. Scalar dataclass defaults (`embedding_key` and
-`adapter`) also participate even when omitted in YAML. None/empty dict keeps
-the saved value. Avoid partial architectural overrides that differ from the
-trained checkpoint; they can cause weight/shape errors. The recipe's complete
-decider dictionary is deliberate.
+`tah` and `tah_engine` also read the model keys of
+[`TaHConfig`](../tah/model/tah_config.py), replacing the saved `tah_config.json`
+fields that are non-null. Dictionaries are **replaced, not merged**: changing only
+`iter_decider_kwargs.threshold` resets the other decider keys to their defaults, so
+copy the full recipe dictionary. Keep `max_iter` consistent with the decider's cap, and
+avoid architectural overrides that differ from the trained checkpoint (they cause
+weight or shape errors).
 
-| Key | Meaning / dataclass default when no saved value applies |
-| --- | --- |
-| `embedding_key` | Base model embedding attribute path; `model.embed_tokens`. Invalid paths fail early. |
-| `max_iter` | Maximum total passes per token, including the first; default None, so inherit/set a checkpoint-compatible integer >=1. |
-| `iter_decider` | Trained decider class: `MLPIterDecider` or `IterLabelDecider`; None means use the saved value. |
-| `iter_decider_kwargs` | Constructor/load overrides for that decider; default `{}`. Nested keys below. |
-| `eval_iter_decider` | None reuses trained decider; `iter_decider` aliases it (recipes); an `iter_decider...` attribute path resolves on the wrapper. A class name builds a separate fresh decider, without loading trained weights for it. |
-| `eval_iter_decider_kwargs` | Constructor settings only for a fresh eval-time class; ignored for None/attribute aliases; default `{}`. Same class-specific keys below, except the special trained-decider `load_path`. |
-| `input_updater_kwargs` | Default `{}`; only `topk` is read (default 100). Mixes embedding rows using softmax of the top-k accumulated logits before another pass. Other entries are retained but inert. This is independent of generation `top_k`. |
-| `adapter` | Only `lora` supported; default `lora`, other names fail. |
-| `adapter_kwargs` | Default `{}`. LoRA constructor options forwarded to installed PEFT's `LoraConfig`, except `base_grad`/`adapter_grad` (both default true) control parameter trainability. Typical options include `r`, `lora_alpha`, `lora_dropout`, `target_modules`, `bias`, `use_rslora`. Saved `lora/` weights/config are reattached on load; this is not a sampling control. |
-| `train_loss` | `NextTokenPredLoss` or `IterDeciderLoss`; default None inherits the checkpoint. Constructed during loading; generation supplies no labels and computes no training loss. |
-| `train_loss_kwargs` | Default `{}`; loss constructor kwargs. `NextTokenPredLoss` has no active knobs; `IterDeciderLoss` accepts `pos_weight` (None), `skip_last_iter` (true), `max_iter` (wrapper cap if omitted). No benchmark generation effect. |
-| `eval_loss` | Optional loss class, default None reuses train loss; no benchmark generation effect. |
-| `eval_loss_kwargs` | Default `{}`, same loss kwargs as above; no benchmark generation effect. |
+## Engine settings
 
-Removed legacy selectors (`input_updater`, `output_updater`,
-`iter_label_generator`, `iter_attention_mode`) are not active overrides;
-unknown YAML/checkpoint fields are filtered. The wrapper has fixed top-k soft
-input updates, additive logits, and duo attention.
-
-### Decider dictionary keys
-
-The following are **constructor defaults**, not necessarily the effective
-checkpoint values. Explicit nested `max_iter` wins over the wrapper's fill-in
-default. Keep both caps consistent. `IterLabelDecider` accepts only `max_iter`
-(constructor default 3); no labels are supplied by benchmark generation, so it
-stops after one pass. `MLPIterDecider` accepts every row below except `load_path`,
-which is a loader option only in `iter_decider_kwargs`:
-
-| Nested key | MLP constructor default | Effect |
-| --- | --- | --- |
-| `topk` | 100 | Top-k logit features projected into hidden width; separate from input updater and sampling k. |
-| `hidden_states_size` | 1024 | Base hidden width; must match checkpoint/model. Recipes use 1024 (0.6B) or 2048 (1.7B). |
-| `hidden_states_layer_nums` | `[16,20,24,28]` | HF hidden-state indices to concatenate; 0 is embedding output, interior k is residual after layer k−1, final index is normalized final output. Empty list selects last state. Out-of-range indices fail. |
-| `hidden_dims` | `[256,512,256]` | MLP widths; must match saved classifier weights. |
-| `expansion_factor` | 4 | Classifier block expansion multiplier; architectural. |
-| `dropout_rate` | 0.3 | Classifier dropout, disabled in eval mode. |
-| `normalize_input` | false | Layer-normalize selected hidden features and softmax logit features before projection; alters architecture/features. |
-| `threshold` | 0.5 | Continue when sigmoid(decision logit) **>** threshold, unless cap reached. In BF16, recipe 0.9 is effectively 0.8984375. |
-| `max_iter` | 3 | Decider pass cap; wrapper supplies its own cap only when this key is absent. |
-| `dtype` | `torch.bfloat16` | Python constructor dtype; ordinary YAML strings are not converted to torch dtypes here. Leave this nested option inherited/omitted; use top-level `dtype` for the backend cast. |
-| `load_path` | Absent | Directory containing an alternative trained `iter_decider.bin`. Popped before construction; otherwise load the checkpoint's decider file if present. Not an MLP constructor argument. |
-
-When loading a decider, constructor args take precedence over colliding state
-entries (e.g. threshold). The dict override replaces the saved dict, so replacing
-only threshold can inadvertently reset architectural values to constructor
-defaults. Preserve the rest of the checkpoint-compatible dict when changing it.
-The reference backend casts the complete TaH model/decider to top-level dtype
-after load. The engine loads BF16 weights and uses the same override precedence.
-
-The driver adds private `_logger_level` and `_random_seed` entries from CLI;
-YAML values with those names are overwritten. They are internal tags, not
-additional user options.
-
-### Engine and grading configuration
-
-The same eval YAML works with `--backend tah` and `--backend tah_engine`.
-Add this optional mapping for engine controls (reference ignores it):
+The same YAML works with `--backend tah` and `--backend tah_engine`; the reference
+ignores the `engine` mapping.
 
 ```yaml
 engine:
   max_batch_size: 64
   memory_fraction: 0.9
-  host_swap_bytes: 8589934592  # 8 GiB, live pinned swap budget
+  host_swap_bytes: 8589934592  # 8 GiB
   prefill_chunk_size: 128
   cuda_graphs: true
   compile: false
+  overlap: null                # null = auto (on); false = ordinary scheduler
 grading_workers: 4
 ```
 
-Every constructor option in [engine.md](engine.md#generate-with-the-engine)
-is accepted here. The default resident cap is 64, limited to the number of
-selected prompts in the job before startup capture. Explicit `graph_batch_sizes`
-are also capped to this range. `batch_size` remains the fixed batch size of the
-reference, HF and SGLang backends. Top-level `max_new_tokens` governs every
-evaluation request; `engine.max_new_tokens` is only the engine's plain-request
-fallback. `engine.seed` defaults to `--random_seed` and sets the base of the
-engine's per-request seed sequence. Use one GPU and `--job_nums 1` on a 3090.
+Every constructor option in [engine options](engine.md#engine-options) is accepted.
+Precedence: the YAML `engine` mapping, then `--engine-options`, then the three
+explicit `--engine-*` flags. The harness caps the resident limit to the number of
+prompts in the job. `engine.seed` defaults to `--random_seed`. Top-level
+`max_new_tokens` governs every evaluation request.
 
-CLI `--engine-options` merges over YAML, then the three explicit engine flags
-win over both. For example, a 16k generation run with the usual resident cap
-on a machine with about 30 GB RAM:
+For long generations (up to 16,384 tokens) see [scheduling, memory and long generations](engine.md#scheduling-memory-and-long-generations).
 
-```bash
-source .venv-tah/bin/activate
-CUDA_VISIBLE_DEVICES=0 python script/tah/evaluation/eval.py \
-  --eval_config script/tah/recipes/qwen3_1.7/eval_tah.yaml \
-  --model_path models/TaH-plus-1.7B --dataset_name math500,gpqa \
-  --backend tah_engine --job_nums 1 --tp_size_per_job 1 \
-  --max-new-tokens 16384 \
-  --engine-max-batch-size 64 --engine-host-swap-gib 8 \
-  --engine-memory-fraction .9 --output_dir data/eval_long
-```
-
-See [long-context sizing](engine.md#long-generations-and-host-memory)
-for prompt bounds and settings. Defaults are CUDA graphs enabled and compile off.
-When a host snapshot would exceed the swap budget, the newest active request
-restarts from its original prompt and seed instead of aborting the run. It keeps
-its sample index and emits one final result; its discarded attempt is counted
-in `engine_run.restarts`/`wasted_tokens` and per-sample raw JSON `timing`. FIFO
-swap restore still comes first, retries precede fresh requests, and fresh
-admission stays blocked while a retry waits. Long generation can keep cap 64;
-smaller caps are an optional way to reduce wasted work. Individual requests
-must still fit model context and the GPU pool.
-
-For small VMs, graph generation needs one CPU core; eager/debug needs at least
-two. Allocate separate cores for grading processes or use `--grading-workers 0`.
-See [CPU affinity measurements](engine.md#cpu-cores-and-affinity).
-
-With `grading_workers > 0`, a generated raw JSON appears immediately with
-`grading_status: pending`; the same file is atomically replaced when its grade
-is complete, then the CSV row is flushed. The job waits for every grade before
-reporting success. `grading_workers: 0` grades within the callback. Metrics record
-grading work, inline time or the final wait for parallel graders. Math-verify
-runs in each process's main thread so its signal timeouts remain effective.
-EvalPlus uses its existing process pool and reports separate grading wall time.
+Grading runs alongside generation. With `grading_workers > 0`, a generated raw JSON
+appears immediately with `grading_status: pending`; it is atomically replaced once
+graded, and the CSV row is flushed. The job waits for every grade before reporting
+success. Math-verify runs in each process's main thread so its signal timeouts work.
+EvalPlus uses its own process pool.
 
 ## GPU and job allocation
 
 Set `CUDA_VISIBLE_DEVICES` to an explicit **comma-separated list of integer
-physical GPU indices**. For example, `CUDA_VISIBLE_DEVICES=0,1` with job_nums 2
-and tp_size_per_job 1 assigns one model instance to each GPU; job_nums 1 and
-tp_size_per_job 2 gives one job both GPUs. Each worker sees its assigned GPUs
-renumbered from zero. Do not use UUID/MIG identifiers with this integer parser.
+physical GPU indices**. For example, `CUDA_VISIBLE_DEVICES=0,1` with `--job_nums 2
+--tp_size_per_job 1` gives each worker one GPU; `--job_nums 1 --tp_size_per_job 2`
+gives one job both GPUs. Each worker sees its GPUs renumbered from zero. Do not use
+UUID or MIG identifiers.
 
-If visibility is unset **or empty**, this driver assumes GPU indices 0..7;
-it does not discover the actual count. It also does not validate that
-`job_nums × tp_size_per_job` fits the supplied list. Use no more jobs/GPUs than
-the explicit pool provides. Empty visibility is safe for `--help` and the
-collector, but it is **not a GPU exclusion mechanism for full evaluation**:
-worker startup rewrites the variable from the allocator's pool.
+If visibility is unset **or empty**, the driver assumes GPUs 0..7 and does not check
+the count. Empty visibility is safe for `--help` and the collector, but it is not a
+way to exclude GPUs from an evaluation: worker startup rewrites the variable from
+the driver's pool. `tah_engine` runs on one GPU and needs `--tp_size_per_job 1`.
 
-`tah_engine` requires `--tp_size_per_job 1`; it runs on one GPU.
-
-Workers use spawn and allocate a free localhost NCCL port (starting at
-29555 + job_id ×100), set `MASTER_ADDR`, `MASTER_PORT`, and
-`SGLANG_NCCL_PORT`. SGLang binds localhost using that assigned port. On Linux,
-workers attempt to terminate when the parent dies. There is no built-in job
-queue, distributed multi-node mode, CPU-device flag, or automatic retry.
+The driver has no job queue, multi-node mode, CPU device option or automatic retry.
 
 ## Crashes and partial results
 
-Each completed sample writes an atomic `sample_<idx>.json` and flushes its
-worker CSV row. The reference, HF and SGLang adapters finish a whole generation batch before
-returning; samples in an interrupted batch are not saved by the harness.
-Callback backends can persist results individually as they arrive.
+Each completed sample writes an atomic `sample_<idx>.json` and flushes its worker
+CSV row. The `tah`, `hf` and `sglang` backends finish a whole generation batch
+before returning, so samples in an interrupted batch are not saved. The engine
+backend persists each result as it arrives.
 
-Worker exceptions caught during evaluation write `job_<id>.error.txt` beside
-each dataset's run artifacts. The parent combines available worker data even
-after failures, verifies exact `(problem_id, sample_idx)` coverage (including
-repeats and duplicates), and marks the run `complete` or `failed` in
-`run_status.json`. A failed worker, missing job report, or coverage mismatch
-causes a nonzero exit and preserves partial results and worker directories.
-A combination/code-grading exception records a traceback in status and is
-re-raised. Failure in one job/dataset marks the whole session failed.
+A worker exception writes `job_<id>.error.txt` beside the dataset's run artifacts.
+The parent combines whatever completed, checks exact `(problem_id, sample_idx)`
+coverage and marks `run_status.json` `complete` or `failed`. A failed worker,
+missing report or coverage mismatch exits nonzero and keeps partial results and
+worker directories. A failure in one job marks the whole session failed.
 
-Status starts as `running` with completed_samples 0 and is updated at
-combination/finalization, **not after each sample**. For live progress inspect
-worker CSVs and console output. A hard kill, initialization failure outside the
-worker's exception handler, or parent interruption may leave `running` status
-and no error text/combined CSV. Older unmarked runs are not proven complete.
+Status is updated at combination, not after each sample. For live progress, read
+the worker CSVs and console output. A hard kill can leave `running` with no combined
+files. Treat runs without `run_status.json` as unverified.
 
-There is no general resume CLI or automatic OOM rebatching. A rerun gets a new
-timestamp and starts the selected workload again. Preserve the old outputs,
-reduce batch_size or select explicit IDs as needed, and verify repeats/coverage
-before using partial output. The collector requires `--allow_incomplete` for
-known failed/running combined results. See [results](results.md) for schemas,
-code grading, and diagnostic collection.
+There is **no resume** for an evaluation: a rerun gets a new timestamp and starts
+the selected workload again. To continue after an interruption, keep the old output,
+count the saved CSV and raw-output pairs, and run only the missing IDs
+(`--data_ids`) into a new output root. The collector needs `--allow_incomplete` for
+failed or running results; see [results](results.md).
 
-## Long runs and terminal reconnections
+## Long runs in tmux
 
-Start long jobs in a **detached** tmux session, and monitor it through a read-only
-client. Detaching protects a job from a disconnected terminal; a normal attached
-client can still send Ctrl-C or shell-activation commands into the running job.
-
-For example, with the smoke config prepared above, these commands start a
-separate evaluation and attach without allowing keyboard input to the job:
+Start long jobs in a **detached** tmux session and watch them through a read-only
+client. Detaching protects the job from a dropped terminal; an attached client can
+still send Ctrl-C into it.
 
 ```bash
 mkdir -p data/eval_smoke_detached
 tmux new-session -d -s tah-eval -c "$PWD" \
-  "bash -c 'set -o pipefail; CUDA_VISIBLE_DEVICES=0 .venv-tah/bin/python script/tah/evaluation/eval.py --eval_config /tmp/tah_eval_smoke.yaml --model_path nics-efc/TaH-plus-1.7B --dataset_name gsm8k --backend tah_engine --job_nums 1 --tp_size_per_job 1 --data_range 5 --output_dir data/eval_smoke_detached 2>&1 | tee data/eval_smoke_detached/console.log'"
+  "bash -c 'set -o pipefail; CUDA_VISIBLE_DEVICES=0 .venv-tah/bin/python script/tah/evaluation/eval.py --eval_config data/eval_configs/smoke.yaml --model_path nics-efc/TaH-plus-1.7B --dataset_name gsm8k --backend tah_engine --job_nums 1 --tp_size_per_job 1 --data_range 5 --output_dir data/eval_smoke_detached 2>&1 | tee data/eval_smoke_detached/console.log'"
 tmux attach-session -r -t tah-eval
 ```
 
-Use `tmux capture-pane -p -S -30 -t tah-eval` for a noninteractive progress
-snapshot. The session can disappear after the command finishes; inspect the
-saved log and `run_status.json` to distinguish completion from interruption.
-Before restarting an interrupted run, count persisted CSV/raw-output pairs,
-preserve them, and select only missing IDs into a new output root. The original
-command starts all its selected problems again; it does not resume a worker CSV.
+For a snapshot without attaching, use `tmux capture-pane -p -S -30 -t tah-eval`.
+The session disappears when the command ends; check `console.log` and
+`run_status.json` to tell completion from interruption.
 
-Source of truth: [CLI](../script/tah/evaluation/eval.py),
-[job runner](../tah/evaluate/jobs.py), [backends](../tah/evaluate/backends.py),
-[config loading](../tah/model/tah_model.py),
-[deciders](../tah/model/iter_decider.py), [sampling](../tah/model/utils.py).
+## Report protocol runs
 
-## Evaluations for the research report
+Evaluations for the research report follow [report/PROTOCOL.md](../report/PROTOCOL.md),
+which defines the benchmarks, seeds, token caps and statistics. Run them with the
+protocol configs below rather than ad-hoc settings. The runner calls `eval.py`
+for each group, records every seed, selection, command and derived config, and
+merges the groups into ordinary dataset directories:
 
-Evaluations whose results go into the report follow the fixed protocol in
-[report/PROTOCOL.md](../report/PROTOCOL.md): which benchmarks, seeds, token
-limits and statistical analysis are used, and how new checkpoints are compared
-with the baseline.
+- [`protocol_wacc.yaml`](../script/tah/recipes/qwen3_1.7/protocol_wacc.yaml): R1,
+  the reference (`--backend tah`) or the engine (`--backend tah_engine`).
+- [`protocol_paper.yaml`](../script/tah/recipes/qwen3_1.7/protocol_paper.yaml): R2,
+  the engine only, with all nine benchmarks and eight samples per problem for AIME25 and AMC23.
 
-## Running and analyzing a report protocol
-
-The protocol runner calls the existing `eval.py` CLI. Its YAML combines a base
-eval recipe with named groups; each group can set datasets, row ranges or
-problem IDs, repeat count, generation cap, batch size, and other eval YAML
-overrides. The two shipped protocols are
-[`protocol_wacc.yaml`](../script/tah/recipes/qwen3_1.7/protocol_wacc.yaml)
-(R1, reference or engine) and
-[`protocol_paper.yaml`](../script/tah/recipes/qwen3_1.7/protocol_paper.yaml)
-(R2, engine). The protocol details and statistical rules are in
-[report/PROTOCOL.md](../report/PROTOCOL.md).
-
-Run each backend and seed into its own output root. This is the OOM-safe U3
-reference command; it uses batch 8 for prompts up to 675 tokens and batch 2 for
-`gpqa_82`, `gpqa_93`, `gpqa_128`, and `gpqa_166`. The merge runs after all groups
-finish:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 .venv-tah/bin/python script/tah/evaluation/run_protocol.py run \
-  --config script/tah/recipes/qwen3_1.7/protocol_wacc.yaml \
-  --model_path models/TaH-plus-1.7B --backend tah --seed 1234 \
-  --output_root data/engine/wacc_reference_protocol_seed1234 --logger_level WARNING \
-  && CUDA_VISIBLE_DEVICES=0 .venv-tah/bin/python script/tah/evaluation/run_protocol.py merge \
-  --output_root data/engine/wacc_reference_protocol_seed1234
-```
-
-If the process is interrupted, run the same `run` command again. The runner
-checks persisted `(problem_id, sample_idx)` rows and launches new sub-runs for
-only the missing pairs. When a problem is missing just one repeat, the
-sub-run generates one sample and maps it to that missing sample index. Inspect
-`protocol_state.json`, each group's `runs/*/command.json`, and its
-`runs/*/eval_config.yaml` to see the exact selection, command, config, and exit
-status. Completed groups are skipped. The separate `merge` command can be run
-again after an interrupted merge; it refuses groups with missing or duplicate
-pairs.
-
-Each group and resume sub-run receives the requested base seed. The current
-eval harness does not save and restore a single random-generator state across
-separate CLI invocations, so group boundaries, batch composition, and resumed
-prompt order can change sampled outputs relative to one uninterrupted run.
-The runner records every seed, selection, command, and derived config as run
-provenance.
-
-For each R1 engine seed, use the same W-acc config with a separate output root.
-For example, this runs seed 42; repeat with seeds `1234` and `2024`, changing
-both values:
+Run each backend and seed into its own output root; `run` and `merge` are separate
+commands (the example is the R1 engine run at seed 42):
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 .venv-tah/bin/python script/tah/evaluation/run_protocol.py run \
   --config script/tah/recipes/qwen3_1.7/protocol_wacc.yaml \
   --model_path models/TaH-plus-1.7B --backend tah_engine --seed 42 \
-  --output_root data/engine/wacc_engine_seed42 --logger_level WARNING \
+  --output_root data/eval_protocol/r1_engine_seed42 --logger_level WARNING \
   && CUDA_VISIBLE_DEVICES=0 .venv-tah/bin/python script/tah/evaluation/run_protocol.py merge \
-  --output_root data/engine/wacc_engine_seed42
+  --output_root data/eval_protocol/r1_engine_seed42
 ```
 
-The paper protocol uses one command per seed and a different output root:
+Use `--backend tah --seed 1234` for the R1 reference run, and `--config
+protocol_paper.yaml` with `--output_root data/eval_protocol/r2_engine_seed<seed>` for R2.
+Merged directories are written under `<output_root>/canonical/`.
 
-```bash
-CUDA_VISIBLE_DEVICES=0 .venv-tah/bin/python script/tah/evaluation/run_protocol.py run \
-  --config script/tah/recipes/qwen3_1.7/protocol_paper.yaml \
-  --model_path models/TaH-plus-1.7B --backend tah_engine --seed 42 \
-  --output_root data/engine/paper_protocol_seed42 --logger_level WARNING \
-  && CUDA_VISIBLE_DEVICES=0 .venv-tah/bin/python script/tah/evaluation/run_protocol.py merge \
-  --output_root data/engine/paper_protocol_seed42
-```
+- **Resume:** repeat the same `run` command; only missing `(problem_id, sample_idx)`
+  pairs are regenerated. Rerun `merge` after an interrupted merge.
+- **Seeds:** resumed sub-runs and group boundaries can change sampled outputs relative
+  to one uninterrupted run, because the harness does not save generator state between
+  invocations. The runner records each seed, selection, command and config.
 
-Repeat with seeds `1234` and `2024`, changing both `--seed` and the output-root
-suffix. R2 fixes all nine benchmarks and their token caps; AIME25 and AMC23 use
-eight samples per problem. The merge writes normal per-dataset run directories
-under `<output_root>/canonical/` for `compare_runs.py`.
-
-Compare the R1 reference against one or more engine seed runs. Repeating `--b`
-adds runs to the same candidate group. An optional `--c` group produces a
-reference-vs-reference comparison alongside the reference-vs-engine result.
-The margin defaults to three percentage points; `--margin 0.03` states it
-explicitly:
+Compare the R1 reference with engine seeds. `--margin` defaults to 0.03 (three points):
 
 ```bash
 CUDA_VISIBLE_DEVICES='' .venv-tah/bin/python script/tah/evaluation/compare_runs.py equivalence \
   --protocol-config script/tah/recipes/qwen3_1.7/protocol_wacc.yaml \
-  --a data/engine/wacc_reference_protocol_seed1234/canonical \
-  --b data/engine/wacc_engine_seed42/canonical \
-  --b data/engine/wacc_engine_seed1234/canonical \
-  --b data/engine/wacc_engine_seed2024/canonical \
-  --label-a Reference --label-b Engine-seeds \
-  --margin 0.03 --output-prefix data/engine/wacc_equivalence
+  --a data/eval_protocol/r1_reference_seed1234/canonical \
+  --b data/eval_protocol/r1_engine_seed42/canonical \
+  --b data/eval_protocol/r1_engine_seed1234/canonical \
+  --b data/eval_protocol/r1_engine_seed2024/canonical \
+  --label-a Reference --label-b Engine-seeds --margin 0.03 \
+  --output-prefix data/eval_protocol/r1_equivalence
 ```
 
-The equivalence output reports candidate-minus-reference accuracy difference,
-paired problem-level SE, 95% and 90% confidence intervals, paired z, TOST verdict,
-and weighted passes-per-token ratio for each dataset and all 398 problems
-pooled. TOST is equivalent only when the full 90% interval lies inside the
-configured ±3 point margin. `equivalence_not_shown` means that interval did not
-fit inside the margin; it does not mean the backends are proven different.
+The output reports, per dataset and pooled, the candidate-minus-reference accuracy
+difference, its paired SE, 95% and 90% intervals, and the passes-per-token ratio.
+Equivalence holds only when the 90% interval lies inside the margin. The verdict
+`equivalence_not_shown` means that interval does not fit; it does not show a difference.
 
-Aggregate the three R2 seed runs with the paper-value column from the protocol
-config:
+Aggregate the R2 seed runs against the paper values:
 
 ```bash
 CUDA_VISIBLE_DEVICES='' .venv-tah/bin/python script/tah/evaluation/compare_runs.py aggregate \
   --protocol-config script/tah/recipes/qwen3_1.7/protocol_paper.yaml \
-  --run data/engine/paper_protocol_seed42/canonical \
-  --run data/engine/paper_protocol_seed1234/canonical \
-  --run data/engine/paper_protocol_seed2024/canonical \
-  --output-prefix data/engine/paper_aggregate
+  --run data/eval_protocol/r2_engine_seed42/canonical \
+  --run data/eval_protocol/r2_engine_seed1234/canonical \
+  --run data/eval_protocol/r2_engine_seed2024/canonical \
+  --output-prefix data/eval_protocol/r2_aggregate
 ```
 
-Aggregation pools sample outcomes across seeds, then computes each benchmark's
-mean and problem-level SE. The nine-benchmark average gives equal weight to
-each benchmark; its SE propagates the benchmark SEs. HumanEval+ and MBPP+
-scores require EvalPlus base and plus tests to pass, while pass statistics are weighted
-by generated tokens. The output includes the paper value and whether it falls
-inside the 95% interval; use `--no-paper-values` to omit those columns. Both
-commands write Markdown and JSON files using the requested output prefix.
+Both analysis commands write Markdown and JSON under the output prefix. They reject
+failed run statuses, missing or duplicate pairs and incomplete EvalPlus results;
+add `--no-paper-values` to omit the paper-value columns.
 
-Before analysis, each input run must have exactly the protocol's expected
-`(problem_id, sample_idx)` pairs. The analyzer rejects failed run statuses,
-missing rows, duplicates, and incomplete EvalPlus results. Legacy run
-directories without `run_status.json` are accepted only when their rows still
-match the full expected key set.
+Source of truth: [CLI](../script/tah/evaluation/eval.py),
+[job runner](../tah/evaluate/jobs.py), [backends](../tah/evaluate/backends.py),
+[config loading](../tah/model/tah_model.py), [deciders](../tah/model/iter_decider.py),
+[sampling](../tah/model/utils.py).
