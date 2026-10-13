@@ -1,7 +1,7 @@
 # TaH v1 engine: developer reference
 
-For engine maintainers. User-facing usage is in [guide/engine.md](../../guide/engine.md);
-measured results are in [report/1-engine](../../report/1-engine/). Run commands from the
+For engine maintainers. User-facing usage is in [guide/engine.md](../guide/engine.md);
+measured results are in [report/1-engine](../report/1-engine/). Run commands from the
 repository root with `source .venv-tah/bin/activate`.
 
 ## Modules
@@ -30,7 +30,7 @@ CUDA_VISIBLE_DEVICES=0 python -m pytest -q -s -o addopts= -m 'gpu and slow' tah/
 `pyproject.toml` sets `addopts = "-m 'not slow'"`. Markers: `gpu` (needs CUDA) and
 `slow` (production fixture replay or long validation). Use `-o addopts=` to run slow
 cases. `kernel_check.py` is a GPU utility, not a pytest module; see
-[installation](../../guide/installation.md#kernel-check-gpu).
+[installation](../guide/installation.md#kernel-check-gpu).
 
 ## Validation CLIs
 
@@ -250,6 +250,57 @@ memory. Times are microseconds. Select CUDA only when the GPU is idle.
 `interpret` checks exact ragged visibility and compaction on CPU. `compile` builds the
 Triton kernels offline for sm80, sm86 and sm89 without loading a CUDA module. Reports
 carry `production_gates_eligible=false`.
+
+## Validating on a new GPU or machine
+
+Run this when the GPU type, the machine or VM, or the driver or CUDA toolkit changes.
+It shows that the test suite passes there and that, on that machine, CUDA graph and
+eager decoding, and overlap and non-overlap scheduling, give identical tokens,
+decisions and counts. It does not prove bitwise equality with another GPU: different
+kernels change bf16 rounding, so outputs can differ at noise level. Use one GPU type
+and software stack for any comparison in a report.
+
+Prerequisites (Python 3.10 headers, a C++ compiler, and an `nvcc` matching the torch
+CUDA major version) are in [installation](../guide/installation.md#engine-prerequisites).
+FlashInfer compiles kernels on first use, so the first run is slow.
+
+From the repository root, in the standard `.venv-tah` environment (created if missing;
+the install line syncs it with the current `pyproject.toml`):
+
+```bash
+set -o pipefail
+export CUDA_VISIBLE_DEVICES=0
+out=data/engine/port/$(nvidia-smi -i "$CUDA_VISIBLE_DEVICES" --query-gpu=name --format=csv,noheader | tr -d '/' | tr ' ' '-')
+mkdir -p "$out"
+[ -d .venv-tah ] || python3.10 -m venv .venv-tah
+source .venv-tah/bin/activate
+python -m pip install -e '.[tah,evaluation,engine,dev]' && python -m pip check
+nvidia-smi > "$out/nvidia-smi.txt"; nvcc --version > "$out/nvcc.txt"
+python - <<'PY' | tee "$out/environment.txt"
+import torch, transformers, peft, flashinfer
+from tah.engine import check_environment
+check_environment()
+assert torch.__version__.split('+')[0] == '2.6.0' and transformers.__version__ == '4.52.4' and peft.__version__ == '0.15.2'
+print('GPU:', torch.cuda.get_device_name(), 'compute capability:', torch.cuda.get_device_capability())
+print('torch/CUDA:', torch.__version__, torch.version.cuda, '| flashinfer:', flashinfer.__version__, '| free/total:', torch.cuda.mem_get_info())
+PY
+python -c "from huggingface_hub import snapshot_download; snapshot_download('nics-efc/TaH-plus-1.7B', local_dir='models/TaH-plus-1.7B')"
+python -m pytest -q tah/engine/tests 2>&1 | tee "$out/default-suite.log"
+python -m tah.engine.tests.engine_check --gate smoke --cuda-graphs --batch-size 16 \
+  --output "$out/wsmoke-graph.json" 2>&1 | tee "$out/wsmoke-graph.log"
+timeout 28m python -m tah.engine.tests.engine_check --gate overlap-identity \
+  --output "$out/overlap-identity.json" 2>&1 | tee "$out/overlap-identity.log"
+```
+
+Pass criteria:
+
+- No pytest failures. Skips are acceptable only for missing archived development
+  fixtures; the log prints their reasons.
+- W-smoke exits 0 with `status` `PASS`, `tokens_identical`, `decisions_identical` and
+  `pass_counts_identical` true, and `run.graph_steps` equal to `run.steps` and above zero.
+- `overlap-identity` exits 0 with `status` `PASS`.
+
+If a gate fails, keep its report and log; do not change registrations or budgets.
 
 ## Full-sequence model (EagerTaHModel)
 

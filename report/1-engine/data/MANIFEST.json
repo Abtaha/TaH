@@ -4,7 +4,7 @@
   "checkpoints": {
     "label3": {
       "base_config": {
-        "_name_or_path": "/home/mateusz/Dokumenty/Projekty/TaH/data/engine/fixture-models/full/label3",
+        "_name_or_path": "data/engine/fixture-models/full/label3",
         "add_cross_attention": false,
         "architectures": [
           "Qwen3ForCausalLM"
@@ -175,12 +175,12 @@
           "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
         }
       },
-      "path": "/home/mateusz/Dokumenty/Projekty/TaH/data/engine/fixture-models/full/label3",
+      "path": "data/engine/fixture-models/full/label3",
       "threshold": 0.5
     },
     "mlp1": {
       "base_config": {
-        "_name_or_path": "/home/mateusz/Dokumenty/Projekty/TaH/data/engine/fixture-models/full/mlp1",
+        "_name_or_path": "data/engine/fixture-models/full/mlp1",
         "add_cross_attention": false,
         "architectures": [
           "Qwen3ForCausalLM"
@@ -368,12 +368,12 @@
           "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
         }
       },
-      "path": "/home/mateusz/Dokumenty/Projekty/TaH/data/engine/fixture-models/full/mlp1",
+      "path": "data/engine/fixture-models/full/mlp1",
       "threshold": 0.5
     },
     "mlp3": {
       "base_config": {
-        "_name_or_path": "/home/mateusz/Dokumenty/Projekty/TaH/data/engine/fixture-models/full/mlp3",
+        "_name_or_path": "data/engine/fixture-models/full/mlp3",
         "add_cross_attention": false,
         "architectures": [
           "Qwen3ForCausalLM"
@@ -792,12 +792,12 @@
           "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
         }
       },
-      "path": "/home/mateusz/Dokumenty/Projekty/TaH/data/engine/fixture-models/full/mlp3",
+      "path": "data/engine/fixture-models/full/mlp3",
       "threshold": 0.94921875
     },
     "real": {
       "base_config": {
-        "_name_or_path": "/home/mateusz/Dokumenty/Projekty/TaH/models/TaH-plus-1.7B",
+        "_name_or_path": "models/TaH-plus-1.7B",
         "add_cross_attention": false,
         "architectures": [
           "Qwen3ForCausalLM"
@@ -989,7 +989,7 @@
           "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
         }
       },
-      "path": "/home/mateusz/Dokumenty/Projekty/TaH/models/TaH-plus-1.7B",
+      "path": "models/TaH-plus-1.7B",
       "threshold": 0.8984375
     }
   },

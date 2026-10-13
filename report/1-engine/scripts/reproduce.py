@@ -80,10 +80,17 @@ def plan(step,out):
     return commands,sources
 
 
+def portable_path(path):
+    path=Path(path).resolve()
+    if path.is_relative_to(REPO.resolve()):return str(path.relative_to(REPO.resolve()))
+    if path.is_relative_to(Path.home()):return '~/'+str(path.relative_to(Path.home()))
+    return str(path)
+
+
 def register_copy(source,destination,purpose,manifest):
     b=source.read_bytes();target=DATA/destination;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(b)
     sha=hashlib.sha256(b).hexdigest()
-    manifest['files'][destination]=dict(sha256=sha,source_sha256=sha,bytes=len(b),source_bytes=len(b),source_path=str(source),source_mtime_utc=datetime.fromtimestamp(source.stat().st_mtime,timezone.utc).isoformat(),encoding='original bytes',purpose=purpose,top_level_keys_or_columns=(next(__import__('csv').reader(b.decode().splitlines())) if source.suffix=='.csv' else list(json.loads(b)) if source.suffix=='.json' else 'YAML mapping'))
+    manifest['files'][destination]=dict(sha256=sha,source_sha256=sha,bytes=len(b),source_bytes=len(b),source_path=portable_path(source),source_mtime_utc=datetime.fromtimestamp(source.stat().st_mtime,timezone.utc).isoformat(),encoding='original bytes',purpose=purpose,top_level_keys_or_columns=(next(__import__('csv').reader(b.decode().splitlines())) if source.suffix=='.csv' else list(json.loads(b)) if source.suffix=='.json' else 'YAML mapping'))
 
 
 def source_inventory():
@@ -148,7 +155,7 @@ def main():
         manifest=json.loads((DATA/'MANIFEST.json').read_text())
         for name,entry in list(manifest['files'].items()):
             if name.startswith('evaluations/'):
-                source=Path(entry['source_path']);source=source if source.is_absolute() else REPO/source
+                source=Path(entry['source_path']).expanduser();source=source if source.is_absolute() else REPO/source
                 register_copy(source,name,entry['purpose'],manifest)
         dump(DATA/'MANIFEST.json',manifest)
     elif args.step=='accuracy':accuracy_inputs(out,inventory)
