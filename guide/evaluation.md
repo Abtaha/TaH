@@ -1,7 +1,7 @@
 # TaH evaluation
 
 The entrypoint is `script/tah/evaluation/eval.py`. From the repository root,
-activate `.venv-tah` with the `tah,evaluation` extras installed. CLI help is
+activate `.venv-tah` with the `tah,evaluation,engine` extras installed. CLI help is
 safe while another process owns the GPU:
 
 ```bash
@@ -14,7 +14,7 @@ The generation examples below are **GPU jobs**; run them only when the selected
 GPU is available. `CUDA_VISIBLE_DEVICES=0` explicitly selects GPU 0 even if the
 shell previously hid GPUs. The full driver is not a CPU-only command.
 
-## Run a small reference evaluation
+## Run a small TaH evaluation
 
 Create a local smoke config from the shipped 1.7B recipe, with smaller batches
 and generation cap, then evaluate the first five GSM8K problems:
@@ -31,7 +31,7 @@ PY
 CUDA_VISIBLE_DEVICES=0 python script/tah/evaluation/eval.py \
   --eval_config /tmp/tah_eval_smoke.yaml \
   --model_path nics-efc/TaH-plus-1.7B \
-  --dataset_name gsm8k --backend tah \
+  --dataset_name gsm8k --backend tah_engine \
   --job_nums 1 --tp_size_per_job 1 --data_range 5 \
   --output_dir data/eval_smoke
 ```
@@ -41,7 +41,7 @@ download on first use. The 0.6B recipe is
 `script/tah/recipes/qwen3_0.6/eval_tah.yaml`; use it only with a compatible 0.6B
 checkpoint. The shipped recipes use **repeat 1**, batch 16, max_new_tokens 4096,
 temperature 0.6, top_p 0.95, top_k 20, min_p 0, max_iter 2, threshold 0.9.
-Batch 16 is not guaranteed to fit long prompts on a 24 GB GPU. The reference
+For the reference backend (`--backend tah`), batch 16 is not guaranteed to fit long prompts on a 24 GB GPU. The reference
 backend left-pads each batch and can allocate large prompt × batch × vocabulary
 buffers; reducing batch size is the main available memory control.
 
@@ -49,11 +49,15 @@ buffers; reducing batch size is the main available memory control.
 
 | `--backend` | Behavior |
 | --- | --- |
-| `tah` | Reference `TaHForCausalLM` and its iteration-aware generation helper. Loads TaH config/LoRA/decider, uses SDPA, returns generated-token pass statistics. Uses `device_map="auto"`; no SGLang engine is involved. |
-| `hf` (default) | Standard `AutoModelForCausalLM.generate`, useful for ordinary base-model baselines. Uses `device_map="auto"`, `trust_remote_code=True`, optional FlashAttention 2. Does not reproduce the TaH selective-iteration wrapper or supply pass counts. |
+| `tah_engine` (default, recommended for TaH v1) | Engine-owned BF16 Qwen3/LoRA/decider execution on one GPU, bounded ragged prefill, continuous batching, CUDA graphs and pinned host swap. Receives every job prompt once, writes each completion incrementally, and returns exact generated-token pass counts. |
+| `tah` | Correctness reference `TaHForCausalLM` and its iteration-aware generation helper. Loads TaH config/LoRA/decider, uses SDPA, returns generated-token pass statistics. Uses `device_map="auto"`; no SGLang engine is involved. |
+| `hf` | Standard `AutoModelForCausalLM.generate`, useful for ordinary base-model baselines. Uses `device_map="auto"`, `trust_remote_code=True`, optional FlashAttention 2. Does not reproduce the TaH selective-iteration wrapper or supply pass counts. |
 | `sglang` | `sglang.Engine` with configured dtype, TP size, memory fraction, attention backend, and sampling. Use checkpoints supported by SGLang; this adapter does not load the TaH reference wrapper/decider and does not supply pass counts. |
 
-`tah_engine` is not a CLI choice yet; see [engine status](engine.md).
+Use `--backend tah` to run the intact reference model and `TaHForCasualLM_generate`.
+Both TaH backends read the same sampling and model overrides from eval YAML.
+If engine prerequisites fail, the error points to `--backend tah`. See
+[engine options](engine.md#generate-with-the-engine).
 HF and SGLang perform a throwaway 100-token generation warmup; the `tah`
 adapter does not call that warmup helper. Each job loads one backend for its
 assigned problems across all requested datasets, then cleans it up.
@@ -106,7 +110,7 @@ source .venv-tah/bin/activate
 CUDA_VISIBLE_DEVICES=0 python script/tah/evaluation/eval.py \
   --eval_config /tmp/tah_eval_smoke.yaml \
   --model_path nics-efc/TaH-plus-1.7B \
-  --dataset_name math500,gpqa --backend tah \
+  --dataset_name math500,gpqa --backend tah_engine \
   --dataset_ranges math500=0:8,gpqa=all \
   --job_nums 1 --tp_size_per_job 1 \
   --output_dir data/eval_multi
@@ -136,8 +140,10 @@ problem stay in its job. The current list-returning backends batch by dataset
 within that job and flush completed results after each returned batch. The
 harness also supports callback backends: they receive all job prompts once and
 persist each indexed result as callbacks arrive (possibly out of order), with
-duplicate/out-of-range/missing callbacks treated as errors. None of the three
-current CLI backends uses this callback mode.
+duplicate/out-of-range/missing callbacks treated as errors. `tah_engine` uses this callback mode and keeps one engine for all datasets
+in its job, including startup captures. Math grading can run in processes while
+generation continues; raw outputs are persisted before grading, and CSV rows
+are flushed as grades finish.
 
 ## Every evaluation CLI option
 
@@ -146,7 +152,13 @@ current CLI backends uses this callback mode.
 | `-h`, `--help` | — | Print help and exit before running evaluation. |
 | `--eval_config PATH` | Required | Load a YAML mapping; copy the original YAML into every dataset run directory. |
 | `--model_path PATH_OR_ID` | Required | Model and tokenizer checkpoint path or Hub ID. |
-| `--backend {sglang,hf,tah}` | `hf` | Select one of the implementations above. |
+| `--backend {sglang,hf,tah,tah_engine}` | `tah_engine` | Select one of the implementations above. |
+| `--engine-options JSON` | None | JSON object merged over YAML `engine`; keys are all constructor options in [engine.md](engine.md). |
+| `--engine-max-batch-size INT` | None | Override `engine.max_batch_size`, the maximum resident requests (engine default 64). |
+| `--engine-host-swap-gib FLOAT` | None | Override `engine.host_swap_bytes` in GiB (engine default 8). |
+| `--engine-memory-fraction FLOAT` | None | Override `engine.memory_fraction` (engine default .9). |
+| `--max-new-tokens INT` | None | Override top-level YAML `max_new_tokens` for all backends and requests. |
+| `--grading-workers INT` | None | Override YAML `grading_workers`; 0 grades inline, positive counts grade in CPU processes. Engine default 4, other backends 0. |
 | `--dataset_name NAMES` | Required | One name or comma-separated names; whitespace is trimmed. |
 | `--job_nums INT` | `1` | Parallel worker/model instances; jobs with no assigned problems are skipped. Use a positive count. |
 | `--tp_size_per_job INT` | `1` | GPUs assigned to each worker. SGLang uses actual tensor parallelism; HF/TaH ignore this as a TP parameter and use auto device placement within their visible GPUs. Use a positive count. |
@@ -156,7 +168,7 @@ current CLI backends uses this callback mode.
 | `--data_ids IDS` | None | Specific standardized IDs, comma-separated; overrides row selection as described above. |
 | `--del_job_dir VALUE` | `True` | Delete `job_<id>/` after all workers and coverage checks succeed. Uses argparse `type=bool`: **any nonempty string, including `False` or `0`, is true**. To retain successful worker directories from this CLI, use `--del_job_dir ''` (empty argument). Failed runs preserve them regardless. |
 | `--logger_level LEVEL` | `WARNING` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`, case-insensitive. Unknown values fall back to WARNING; progress/print output still appears. |
-| `--random_seed INT` | `42` | Same seed in every worker for Python, NumPy, torch and CUDA; job IDs do not offset it. Batch composition, backend and sharding can change outputs despite the same seed. |
+| `--random_seed INT` | `42` | Same seed in every worker for Python, NumPy, torch and CUDA; engine request seeds are the base seed plus the job prompt index; job IDs do not offset it. Batch composition, backend and sharding can change outputs despite the same seed. |
 
 ## Evaluation YAML keys
 
@@ -172,11 +184,13 @@ TaH additionally forwards all recognized `TaHConfig` fields below.
 | `top_k` | All | TaH defaults to 0 (disabled); HF/SGLang omit it if absent/null and use their own defaults. For TaH supply a nonnegative integer; positive k clamps to vocabulary size and retains cutoff ties. Do not pass null to TaH. |
 | `min_p` | All | TaH defaults to 0 (disabled); HF/SGLang omit it if absent/null. Reference keeps probabilities >= min_p × maximum probability. Use [0,1]; do not pass null to TaH. |
 | `max_new_tokens` | All | Required. Generation cap per sample; EOS can stop earlier. Use a positive integer. |
-| `batch_size` | All | Required. Prompts/samples per batch in current adapters; no automatic OOM retry or adaptive batching. |
+| `batch_size` | Reference/HF/SGLang | Required by the harness. Samples per fixed batch; engine resident cap is `engine.max_batch_size` and defaults to 64 independently of this key. |
 | `repeat_size` | Harness | Required. Samples per selected problem; positive integer. |
-| `dtype` | All | `bfloat16`. HF/TaH look up `torch.<name>`; SGLang receives the string. Use a dtype the model/GPU supports (e.g. `bfloat16`, `float16`, `float32` for torch). |
+| `dtype` | All | `bfloat16`. HF/TaH look up `torch.<name>`; SGLang receives the string. The engine requires `bfloat16`. Other backends use a dtype the model/GPU supports (e.g. `bfloat16`, `float16`, `float32` for torch). |
 | `mem_fraction_static` | SGLang | `0.90` (recipes: 0.8). Static-memory fraction passed to SGLang; **ignored by HF/TaH**, so lowering it will not fix reference OOM. |
 | `attention_backend` | SGLang | `triton`. Forwarded to SGLang; availability is determined by the installed SGLang version. |
+| `engine` | `tah_engine` | Optional nested mapping of all `TaHEngine` constructor options; see below. Unknown options fail. |
+| `grading_workers` | Harness | Nonnegative process count; default 4 for engine, 0 for others. Code test execution already uses the EvalPlus process pool. |
 | `use_flash_attention` | HF | False if absent. Truthy value selects `flash_attention_2` and requires flash-attn. Ignored by TaH (always SDPA) and SGLang. Use YAML booleans, not quoted strings. |
 
 Reference sampling order is temperature → softmax → min-p/renormalize →
@@ -184,12 +198,13 @@ top-k/renormalize → top-p/renormalize → multinomial. Top-p keeps the first t
 that crosses the mass threshold, and at least one token. Greedy uses argmax
 and ignores these filters. HF and SGLang use their own sampling implementations;
 these settings do not guarantee identical tokens across backends.
-There is no eval CLI/YAML `do_sample`, stop-string, per-request seed, engine
-memory-pool, CUDA-graph, or compile option in this driver.
+Sampling is shared across requests; the driver derives `do_sample` from
+temperature. Stop strings and individual request seeds are not CLI options.
+Engine memory, graph and compile options are accepted through `engine`.
 
 ### TaH model override keys
 
-Only `tah` consumes these keys, defined in
+Both `tah` and `tah_engine` consume these keys, defined in
 [`TaHConfig`](../tah/model/tah_config.py). The saved `tah_config.json` is the
 starting point. The adapter constructs a `TaHConfig` from recognized YAML
 fields; non-None and nonempty-dict values replace saved fields, **without
@@ -247,11 +262,63 @@ When loading a decider, constructor args take precedence over colliding state
 entries (e.g. threshold). The dict override replaces the saved dict, so replacing
 only threshold can inadvertently reset architectural values to constructor
 defaults. Preserve the rest of the checkpoint-compatible dict when changing it.
-The backend casts the complete TaH model/decider to top-level dtype after load.
+The reference backend casts the complete TaH model/decider to top-level dtype
+after load. The engine loads BF16 weights and uses the same override precedence.
 
 The driver adds private `_logger_level` and `_random_seed` entries from CLI;
 YAML values with those names are overwritten. They are internal tags, not
 additional user options.
+
+### Engine and grading configuration
+
+The same eval YAML works with `--backend tah` and `--backend tah_engine`.
+Add this optional mapping for engine controls (reference ignores it):
+
+```yaml
+engine:
+  max_batch_size: 64
+  memory_fraction: 0.9
+  host_swap_bytes: 8589934592  # 8 GiB, live pinned swap budget
+  prefill_chunk_size: 128
+  cuda_graphs: true
+  compile: false
+grading_workers: 4
+```
+
+Every constructor option in [engine.md](engine.md#generate-with-the-engine)
+is accepted here. The default resident cap is 64, limited to the number of
+selected prompts in the job before startup capture. Explicit `graph_batch_sizes`
+are also capped to this range. `batch_size` remains the fixed batch size of the
+reference, HF and SGLang backends. Top-level `max_new_tokens` governs every
+evaluation request; `engine.max_new_tokens` is only the engine's plain-request
+fallback. `engine.seed` defaults to `--random_seed` and sets the base of the
+engine's per-request seed sequence. Use one GPU and `--job_nums 1` on a 3090.
+
+CLI `--engine-options` merges over YAML, then the three explicit engine flags
+win over both. For example, a conservative 16k generation run on a machine with
+about 30 GB RAM and prompts up to 3k tokens:
+
+```bash
+source .venv-tah/bin/activate
+CUDA_VISIBLE_DEVICES=0 python script/tah/evaluation/eval.py \
+  --eval_config script/tah/recipes/qwen3_1.7/eval_tah.yaml \
+  --model_path models/TaH-plus-1.7B --dataset_name math500,gpqa \
+  --backend tah_engine --job_nums 1 --tp_size_per_job 1 \
+  --max-new-tokens 16384 \
+  --engine-max-batch-size 4 --engine-host-swap-gib 8 \
+  --engine-memory-fraction .9 --output_dir data/eval_long
+```
+
+See [long-context sizing](engine.md#long-generations-and-host-memory)
+for prompt bounds and settings. Defaults are CUDA graphs enabled and compile off.
+
+With `grading_workers > 0`, a generated raw JSON appears immediately with
+`grading_status: pending`; the same file is atomically replaced when its grade
+is complete, then the CSV row is flushed. The job waits for every grade before
+reporting success. `grading_workers: 0` grades within the callback. Metrics record
+grading work, inline time or the final wait for parallel graders. Math-verify
+runs in each process's main thread so its signal timeouts remain effective.
+EvalPlus uses its existing process pool and reports separate grading wall time.
 
 ## GPU and job allocation
 
@@ -268,6 +335,8 @@ the explicit pool provides. Empty visibility is safe for `--help` and the
 collector, but it is **not a GPU exclusion mechanism for full evaluation**:
 worker startup rewrites the variable from the allocator's pool.
 
+`tah_engine` requires `--tp_size_per_job 1`; it runs on one GPU.
+
 Workers use spawn and allocate a free localhost NCCL port (starting at
 29555 + job_id ×100), set `MASTER_ADDR`, `MASTER_PORT`, and
 `SGLANG_NCCL_PORT`. SGLang binds localhost using that assigned port. On Linux,
@@ -277,7 +346,7 @@ queue, distributed multi-node mode, CPU-device flag, or automatic retry.
 ## Crashes and partial results
 
 Each completed sample writes an atomic `sample_<idx>.json` and flushes its
-worker CSV row. Current adapters finish a whole generation batch before
+worker CSV row. The reference, HF and SGLang adapters finish a whole generation batch before
 returning; samples in an interrupted batch are not saved by the harness.
 Callback backends can persist results individually as they arrive.
 
@@ -315,7 +384,7 @@ separate evaluation and attach without allowing keyboard input to the job:
 ```bash
 mkdir -p data/eval_smoke_detached
 tmux new-session -d -s tah-eval -c "$PWD" \
-  "bash -c 'set -o pipefail; CUDA_VISIBLE_DEVICES=0 .venv-tah/bin/python script/tah/evaluation/eval.py --eval_config /tmp/tah_eval_smoke.yaml --model_path nics-efc/TaH-plus-1.7B --dataset_name gsm8k --backend tah --job_nums 1 --tp_size_per_job 1 --data_range 5 --output_dir data/eval_smoke_detached 2>&1 | tee data/eval_smoke_detached/console.log'"
+  "bash -c 'set -o pipefail; CUDA_VISIBLE_DEVICES=0 .venv-tah/bin/python script/tah/evaluation/eval.py --eval_config /tmp/tah_eval_smoke.yaml --model_path nics-efc/TaH-plus-1.7B --dataset_name gsm8k --backend tah_engine --job_nums 1 --tp_size_per_job 1 --data_range 5 --output_dir data/eval_smoke_detached 2>&1 | tee data/eval_smoke_detached/console.log'"
 tmux attach-session -r -t tah-eval
 ```
 

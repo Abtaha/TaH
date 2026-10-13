@@ -13,6 +13,8 @@ coverage before interpreting accuracy. A CSV can exist after a failed run.
       [TASK_<start>_<end>/]       # present for a selected row range
         <eval_config_basename>   # copy of the original YAML
         run_status.json
+        effective_config.yaml
+        job_<id>.metrics.json              # successful job timing/engine telemetry
         detailed_results.csv
         evaluation_stats.csv
         samples.jsonl
@@ -38,7 +40,9 @@ are clamped to dataset length. Standardized IDs are
 
 | File | Contents / lifetime |
 | --- | --- |
-| Copied YAML | Original eval config, unchanged by worker-private seed/log tags. Model/backend/seed/selection are not all encoded in it; preserve CLI provenance too. |
+| Copied YAML | Original eval config. `effective_config.yaml` adds CLI overrides and seed/log tags; preserve both plus the invocation. |
+| `effective_config.yaml` | Config actually sent to workers, including merged engine options and generation/grading overrides. |
+| `job_<id>.metrics.json` | Successful job timing, grading work/wait, engine generation and callback wall scopes, allocated/reserved GPU peaks, startup memory budget, graph/compile and swap telemetry. Duplicated in each dataset directory for a shared job: do not sum the duplicates. |
 | `job_<id>/detailed_results.csv` | Incremental completed-sample rows; flushed after each result. This is where to look during a run. |
 | `job_<id>/details/.../sample_<idx>.json` | Raw output and grading detail written through a temporary file with fsync/atomic rename. Repeats use zero-based indices. |
 | `job_<id>/evaluation_stats.csv` | Job-local problem/totals summaries, written only after its inference finishes successfully. |
@@ -56,8 +60,9 @@ crash; they are not finalized records. Successful runs delete worker directories
 by default after coverage checks. Use `--del_job_dir ''` to keep them (the CLI's
 boolean parsing makes `--del_job_dir False` true). Failed runs keep them
 regardless. Combined `samples.jsonl` preserves raw outputs after successful
-worker cleanup. Console logs, inference wall time, GPU peaks, token IDs, and
-per-token pass-count arrays are **not** saved by these result writers.
+worker cleanup. Console logs need shell redirection. Engine token IDs and per-token counts are
+saved in raw JSON; inference timing and GPU peaks are saved in job metrics.
+Reference/HF/SGLang token IDs and full pass arrays are not exported.
 
 ## Every detailed CSV column
 
@@ -73,7 +78,7 @@ per-token pass-count arrays are **not** saved by these result writers.
 | `is_correct` | Python-style `True`/`False` from the math grader; false placeholder for code rows even after EvalPlus succeeds. |
 | `input_tokens` | `len(tokenizer.encode(problem_text))`, **raw question only**, not the rendered/padded chat prompt. |
 | `output_tokens` | `len(tokenizer.encode(output_text))`, retokenized decoded output; may differ from the exact generated token count due to decoding/special tokens. |
-| `processing_time` | Backend-reported seconds: HF/TaH divide batch inference elapsed by batch outputs; SGLang attaches the whole batch elapsed to each output. CUDA events when CUDA is available, wall clock fallback otherwise. Excludes model load and helper warmup; does not measure end-to-end run wall time. |
+| `processing_time` | Backend-reported seconds: HF/TaH divide batch inference elapsed by batch outputs; SGLang attaches the whole batch elapsed to each output. CUDA events when CUDA is available, wall clock fallback otherwise. For the engine it is request latency including its queue time; overlapping latencies must not be summed for throughput. Excludes model load and helper warmup; does not measure end-to-end run wall time. |
 | `mean_passes_per_token` | Mean generated-token pass count, six decimals; blank when unavailable/empty. |
 | `fraction_tokens_at_least_2_passes` | Fraction of counted generated tokens using >=2 passes, six decimals; blank when unavailable/empty. |
 | `pass_stat_tokens` | Number of generated tokens with pass counts; 0 when unavailable/empty. This is the weighting denominator, not output_tokens. |
@@ -81,6 +86,31 @@ per-token pass-count arrays are **not** saved by these result writers.
 Do not compare backend throughput by blindly summing `processing_time`: the
 SGLang timing convention differs, concurrent jobs overlap, and grading/load/
 other overhead are absent. Measure generation wall time separately for throughput.
+
+## Job timing and engine telemetry
+
+`job_<id>.metrics.json` records one shared job across every dataset it served.
+`setup_seconds` covers model load and startup capture. `inference_call_seconds`
+covers tokenization, one throwaway warmup, inference and callbacks.
+`job_wall_seconds` measures from ready result writers through the final grading
+wait. It excludes prompt construction, final statistics writing and cleanup.
+`grading_work_seconds` sums measured math-grade durations (CPU process wall times
+can overlap); `grading_inline_seconds` is blocking callback grading when workers
+are zero; `grading_tail_seconds` is the final wait for all queued grades. Their
+sum is not a total elapsed scope when grading runs in parallel.
+
+Engine metrics also include `engine_options` (effective resident cap),
+`memory_budget` (startup KV reservations and both graph capture rounds),
+`engine_run` (generation wall/steps/swaps/host-swap peak), `callback_seconds`,
+`generation_seconds`, and `peak_gpu_allocated_bytes`/`peak_gpu_reserved_bytes`.
+`generation_seconds` is engine wall time minus synchronous callback time;
+use exact `engine_run.generated_tokens / generation_seconds` for throughput
+excluding load, warmup and persistence/inline grading. The engine wall scope
+itself includes callbacks. Parallel grading still shares CPU resources with
+generation. The GPU peaks are PyTorch allocated/reserved bytes after warmup,
+excluding CUDA driver/module memory; startup capture device deltas are recorded
+separately in `memory_budget`. Code grading follows generation and has its own
+`run_status.code_grading_seconds`.
 
 ## Every statistics CSV column
 
@@ -106,8 +136,7 @@ status/coverage matters.
 For TaH, a generated token's reported pass count is the number of passes at
 the **context position whose final logits sampled it**. This includes the last
 prompt position's work for the first generated token; EOS is excluded. Counts
-for all prompt positions are not exported by this harness. The reference
-backend supplies these counts; HF/SGLang do not. Pass counts summarize compute,
+for all prompt positions are not exported by this harness. Both TaH backends supply these counts; HF/SGLang do not. Pass counts summarize compute,
 not grading correctness.
 
 For a set of rows with nonempty pass metrics and `pass_stat_tokens > 0`:
@@ -129,7 +158,12 @@ Each `sample_<idx>.json` has `problem_id`, `problem` (question text), `output`
 Code samples additionally have `extracted_code` and `entry_point`.
 If the backend supplies pass counts, it adds `mean_passes_per_token`,
 `fraction_tokens_at_least_2_passes`, and `pass_stat_tokens`; an empty count list
-produces null metrics and 0 tokens. Full count arrays are not serialized.
+produces null metrics and 0 tokens. Engine results additionally include `token_ids`, `pass_counts` (generated),
+`prompt_pass_counts`, `finish_reason`, and request `timing`. The reference
+continues to export summaries without full arrays. During parallel grading,
+an engine raw sample may have `grading_status: pending` and no grade yet;
+that file is replaced when graded, then its CSV row appears. Pending samples
+in a failed/interrupted run are ungraded evidence and do not count as completed.
 The JSON contains no input/output token counts or processing_time; those are
 in the CSV. Combined `samples.jsonl` keeps these fields and adds `id` (same as
 problem_id) and `sample` (repeat index inferred from the filename).
@@ -146,6 +180,9 @@ problem_id) and `sample` (repeat index inferred from the filename).
 | `batch_size`, `repeat_size`, `random_seed` | YAML batch/repeat settings and worker seed from CLI. |
 | `completed_jobs`, `failed_jobs` | Final session-wide worker-report totals; failed_jobs also signals missing reports or coverage mismatch. Not necessarily specific to this dataset. Added on normal finalization. |
 | `error` | Traceback on combination/code-evaluation failure; optional. Worker-specific traceback is in `job_<id>.error.txt`. |
+
+`code_grading_seconds`, when present in status, is the parent EvalPlus wall time
+for that dataset.
 
 Status is atomically replaced. An interrupted process may leave `running`,
 no combined summaries, and only worker artifacts. Known failed runs may still
@@ -201,7 +238,7 @@ not at a dataset or timestamp directory. The collector recursively finds
 combined `evaluation_stats.csv`, ignores any path component starting `job_`,
 and writes one row per dataset/run directory.
 
-After the [smoke evaluation](evaluation.md#run-a-small-reference-evaluation):
+After the [smoke evaluation](evaluation.md#run-a-small-tah-evaluation):
 
 ```bash
 export CUDA_VISIBLE_DEVICES=""
@@ -257,7 +294,7 @@ it writes the same CSV and returns the list of row dictionaries.
 | `model` | Explicit label or root parent name. |
 | `run` | Path beginning at timestamp, including a TASK suffix when present. |
 | `dataset` | Parsed dataset folder prefix. |
-| `backend` | Parsed suffix: `sglang`, `hf`, `tah`; parser also recognizes future `tah_engine` outputs, although that backend is not yet runnable. Unknown suffix becomes blank. |
+| `backend` | Parsed suffix: `sglang`, `hf`, `tah`, or `tah_engine`. Unknown suffix becomes blank. |
 | `metric` | `accuracy`, or `pass@1 (base)` when recognized EvalPlus JSON has that score. |
 | `accuracy_or_pass_at_1` | Three-decimal stored accuracy for math; EvalPlus's base pass@1 value for code. |
 | `correct_count` | CSV correct count for math; count of base-passing code completions for code. |

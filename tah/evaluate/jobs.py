@@ -30,6 +30,7 @@ import threading
 import time
 import traceback
 from multiprocessing import Process, Queue
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing as mp
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -186,6 +187,7 @@ def _process_result(
     tokenizer,
     writers: Dict[str, Tuple[object, csv.DictWriter]],
     all_results: Dict[str, List[dict]],
+    scored=None,
 ) -> None:
     """Grade and persist a single result, safe to call from a backend callback."""
     output_text, proc_time, pass_counts = _normalise_inference_result(backend_result)
@@ -193,7 +195,8 @@ def _process_result(
     p = problems[pi]
     dataset_name = p["dataset_name"]
     is_code = p["answer_type"] in _CODE_ANSWER_TYPES
-    pred, has_ans, ok = _score_one(output_text, p["correct_answer"], dataset_name, is_code=is_code)
+    pred, has_ans, ok = scored if scored is not None else _score_one(
+        output_text, p["correct_answer"], dataset_name, is_code=is_code)
     detail = {
         "problem_id": p["problem_id"],
         "problem": p["problem_text"],
@@ -213,6 +216,10 @@ def _process_result(
         detail["mean_passes_per_token"] = float(mean_passes) if pass_counts else None
         detail["fraction_tokens_at_least_2_passes"] = float(frac_two_plus) if pass_counts else None
         detail["pass_stat_tokens"] = pass_tokens
+    if isinstance(backend_result, dict):
+        for key in ("token_ids", "pass_counts", "prompt_pass_counts", "finish_reason", "timing"):
+            if key in backend_result:
+                detail[key] = backend_result[key]
     sample_path = p["problem_dir"] / f"sample_{sample_idx}.json"
     tmp_path = sample_path.with_suffix(".json.tmp")
     with open(tmp_path, "w", encoding="utf-8") as fd:
@@ -241,6 +248,38 @@ def _process_result(
     all_results[dataset_name].append(row)
 
 
+def _grading_init():
+    # CPU graders must not create CUDA contexts or compete for BLAS threads.
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    import torch
+    torch.set_num_threads(1)
+
+
+def _score_timed(output, answer, dataset, is_code):
+    started = time.perf_counter()
+    score = _score_one(output, answer, dataset, is_code=is_code)
+    return score, time.perf_counter() - started
+
+
+def _save_pending_result(index, result, mapping, problems):
+    """Persist generated text before a process grader has finished."""
+    pi, sample = mapping[index]
+    p = problems[pi]
+    text, seconds, counts = _normalise_inference_result(result)
+    detail = dict(problem_id=p["problem_id"], problem=p["problem_text"], output=text,
+                  correct_answer=p["correct_answer"], grading_status="pending")
+    if isinstance(result, dict):
+        detail.update({k: result[k] for k in ("token_ids", "pass_counts", "prompt_pass_counts",
+                                             "finish_reason", "timing") if k in result})
+    path = p["problem_dir"] / f"sample_{sample}.json"
+    tmp = path.with_suffix(".json.tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(detail, f, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 def run_single_job(
     *, config: Dict, combined_dataset_name: str, output_dir: str, timestamp: str,
     model_path: str, job_id: int, job_nums: int, start_idx: int, end_idx: int,
@@ -258,7 +297,13 @@ def run_single_job(
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    config = dict(config, _prompt_count=len(problems_data) * config["repeat_size"])
+    grading_workers = config.get("grading_workers", 4 if backend == "tah_engine" else 0)
+    if isinstance(grading_workers, bool) or not isinstance(grading_workers, int) or grading_workers < 0:
+        raise ValueError("grading_workers must be a nonnegative integer")
+    setup_started = time.perf_counter()
     model, infer = setup_backend(backend, config, model_path, tokenizer, tp_size=tp_size)
+    setup_seconds = time.perf_counter() - setup_started
 
     problems = []
     for i, item in enumerate(problems_data):
@@ -294,6 +339,42 @@ def run_single_job(
             f.flush()
             writers[ds_name] = (f, writer)
 
+    pool = ProcessPoolExecutor(max_workers=grading_workers, mp_context=mp.get_context("spawn"),
+                               initializer=_grading_init) if grading_workers else None
+    pending = {}
+    grading_work_seconds = 0.0
+    grading_inline_seconds = 0.0
+    inference_seconds = 0.0
+    run_started = time.perf_counter()
+
+    def persist(index, result, score):
+        _process_result(index, result, prompt_to_problem, problems, tokenizer, writers, all_results,
+                        scored=score)
+
+    def drain(futures):
+        nonlocal grading_work_seconds
+        for future in futures:
+            index, result = pending.pop(future)
+            score, seconds = future.result()
+            grading_work_seconds += seconds
+            persist(index, result, score)
+
+    def process(index, result):
+        nonlocal grading_work_seconds, grading_inline_seconds
+        pi, _ = prompt_to_problem[index]
+        p = problems[pi]
+        text, _, _ = _normalise_inference_result(result)
+        args = (text, p["correct_answer"], p["dataset_name"], p["answer_type"] in _CODE_ANSWER_TYPES)
+        if pool is not None:
+            _save_pending_result(index, result, prompt_to_problem, problems)
+            pending[pool.submit(_score_timed, *args)] = (index, result)
+            drain([future for future in pending if future.done()])
+        else:
+            score, seconds = _score_timed(*args)
+            grading_work_seconds += seconds
+            grading_inline_seconds += seconds
+            persist(index, result, score)
+
     try:
         if getattr(infer, "supports_callback", False):
             callback_lock = threading.Lock()
@@ -306,10 +387,14 @@ def run_single_job(
                 with callback_lock:
                     if index in seen_results:
                         raise ValueError(f"backend reported prompt {index} more than once")
-                    _process_result(index, result, prompt_to_problem, problems, tokenizer, writers, all_results)
+                    process(index, result)
                     seen_results.add(index)
+                    if len(seen_results) % 16 == 0 or len(seen_results) == len(prompts):
+                        print(f"Job {job_id}: generated {len(seen_results)}/{len(prompts)} samples", flush=True)
 
+            inference_started = time.perf_counter()
             infer(prompts, on_result=on_result)
+            inference_seconds += time.perf_counter() - inference_started
             missing = len(prompts) - len(seen_results)
             if missing:
                 raise RuntimeError(f"callback backend returned without reporting {missing} of {len(prompts)} prompts")
@@ -323,16 +408,32 @@ def run_single_job(
                     inference_batches.append(indexes[start:start + bs])
             for indexes in tqdm(inference_batches,
                                 desc=f"Job {job_id} batches", position=job_id, leave=True):
+                inference_started = time.perf_counter()
                 batch_outputs = infer([prompts[i] for i in indexes])
+                inference_seconds += time.perf_counter() - inference_started
                 if len(batch_outputs) != len(indexes):
                     raise ValueError(f"backend returned {len(batch_outputs)} outputs for {len(indexes)} prompts")
                 for prompt_idx, result in zip(indexes, batch_outputs):
-                    _process_result(prompt_idx, result, prompt_to_problem, problems, tokenizer, writers, all_results)
+                    process(prompt_idx, result)
+        wait_started = time.perf_counter()
+        drain(as_completed(list(pending)))
+        grading_tail_seconds = time.perf_counter() - wait_started
+        metrics = dict(setup_seconds=setup_seconds, inference_call_seconds=inference_seconds,
+                       job_wall_seconds=time.perf_counter() - run_started,
+                       grading_workers=grading_workers, grading_work_seconds=grading_work_seconds,
+                       grading_inline_seconds=grading_inline_seconds,
+                       grading_tail_seconds=grading_tail_seconds,
+                       **getattr(infer, "telemetry", {}))
+        for ds_name in writers:
+            directory = _dataset_run_dir(output_dir, ds_name, backend, timestamp, dataset_ranges.get(ds_name))
+            (directory / f"job_{job_id}.metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
         for ds_name, rows in all_results.items():
             if rows:
                 _write_job_stats(_job_output_dir(output_dir, ds_name, backend, timestamp, job_id,
                                                  dataset_ranges.get(ds_name)), rows)
     finally:
+        if pool is not None:
+            pool.shutdown(wait=True, cancel_futures=True)
         for f, _ in writers.values():
             f.close()
         cleanup(model, backend)
@@ -455,8 +556,16 @@ def _run_job_process(job_args: Tuple, result_queue: Queue) -> None:
     os.environ["SGLANG_NCCL_PORT"] = str(port)
 
     import torch
-    from tah.model.utils import set_all_seeds
-    set_all_seeds(config.get("_random_seed", 420))
+    if backend == "tah_engine":
+        import random
+        import numpy as np
+        seed = config.get("_random_seed", 420)
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+    else:
+        from tah.model.utils import set_all_seeds
+        set_all_seeds(config.get("_random_seed", 420))
     if torch.cuda.is_available():
         torch.cuda.init()
 
@@ -675,6 +784,26 @@ def allocate_gpus_and_run_jobs(args) -> None:
     # Load + tag YAML config (worker reads back the tags via config["_..."]).
     with open(args.eval_config, "r") as f:
         eval_config = yaml.safe_load(f)
+    engine_options = dict(eval_config.get("engine") or {})
+    overrides = getattr(args, "engine_options", None)
+    if overrides is not None:
+        if not isinstance(overrides, dict):
+            raise ValueError("--engine-options must be a JSON object")
+        engine_options.update(overrides)
+    for attribute, key in (("engine_max_batch_size", "max_batch_size"),
+                           ("engine_memory_fraction", "memory_fraction")):
+        value = getattr(args, attribute, None)
+        if value is not None:
+            engine_options[key] = value
+    swap_gib = getattr(args, "engine_host_swap_gib", None)
+    if swap_gib is not None:
+        engine_options["host_swap_bytes"] = int(swap_gib * 1024**3)
+    if engine_options:
+        eval_config["engine"] = engine_options
+    if getattr(args, "grading_workers", None) is not None:
+        eval_config["grading_workers"] = args.grading_workers
+    if getattr(args, "max_new_tokens", None) is not None:
+        eval_config["max_new_tokens"] = args.max_new_tokens
     eval_config["_logger_level"] = args.logger_level
     eval_config["_random_seed"] = getattr(args, "random_seed", 420)
 
@@ -688,6 +817,7 @@ def allocate_gpus_and_run_jobs(args) -> None:
         ds_run_dir = _dataset_run_dir(args.output_dir, ds_name, args.backend, timestamp, dataset_ranges.get(ds_name))
         ds_run_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(args.eval_config, ds_run_dir / Path(args.eval_config).name)
+        (ds_run_dir / "effective_config.yaml").write_text(yaml.safe_dump(eval_config, sort_keys=False))
         dataset_run_dirs[ds_name] = ds_run_dir
         run_statuses[ds_name] = {
             "status": "running", "model_path": str(Path(args.model_path).resolve()),
@@ -736,7 +866,9 @@ def allocate_gpus_and_run_jobs(args) -> None:
                     from tah.evaluate.codeeval import evaluate as code_evaluate
                     n_lines = sum(1 for _ in open(code_solutions_file, encoding="utf-8"))
                     print(f"\nCode eval: {ds_name} on {n_lines} solutions ({code_solutions_file})")
+                    grade_started = time.perf_counter()
                     code_evaluate(dataset=ds_name, samples=str(code_solutions_file), allow_subset=True)
+                    run_statuses[ds_name]["code_grading_seconds"] = time.perf_counter() - grade_started
                     print(f"Code eval results: {code_solutions_file.with_suffix('.eval_results.json')}")
     except Exception:
         for ds_name, ds_run_dir in dataset_run_dirs.items():

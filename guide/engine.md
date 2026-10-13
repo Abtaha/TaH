@@ -1,15 +1,16 @@
 # TaH inference engine
 
-`TaHEngine` provides experimental generation for local TaH v1 checkpoints on one
+`TaHEngine` provides generation for local TaH v1 checkpoints on one
 CUDA GPU. It runs all prompt passes in bounded chunks, mixes token depths in
 decode, and admits queued requests as completed requests free capacity. CUDA
-graph decode is enabled by default. The evaluation CLI's `tah_engine` backend is still pending;
-the evaluation CLI accepts `tah`, `hf`, and `sglang`.
+graph decode is enabled by default. `tah_engine` is the default and recommended
+TaH v1 evaluation backend. `--backend tah` retains the intact model and
+`TaHForCasualLM_generate` as the correctness reference.
 
 Generated-sequence reference parity, greedy sanity checks and production swap/
 long-context robustness checks pass on the RTX 3090. Eager W-perf with 64 resident
 requests measures 962.81 generated tokens/s versus 78.26 for the reference baseline.
-End-to-end accuracy evaluation and L40S validation remain later validation steps.
+L40S validation remains a user-run portability check.
 Graph decode at the same resident cap measures 1,353.18 tokens/s (1.41 times
 eager), with exact W-smoke and forced-swap tokens/decisions/pass counts. The
 16,384-token stress completes within the default 8 GiB host swap budget,
@@ -18,8 +19,17 @@ and both sizing/final rounds; the measured initial GPU memory delta is 1,522
 MiB, including 106 MiB of private graph storage. All of it is accounted for
 when sizing KV. These measurements are from the RTX 3090.
 
+Through the evaluation harness, the same 64-request cap measures 1,342.52
+generated tokens/s (17.15 times reference) on Math500 `[0,64)`, repeat 2,
+4096-token cap, excluding setup, warmup and synchronous result callbacks.
+Accuracy validation passes the specified two pooled binomial standard errors
+and ±10% mean-pass limits: Math500 `[0,200)` scores 66.50% versus reference
+70.75%, and GPQA Diamond scores 34.60% versus 36.36%, both with repeat 2.
+Mean passes/token are 1.070168 and 1.197301. Observed accuracies differ;
+these results pass the statistical limits, rather than establishing exact equality.
+
 Use [installation](installation.md) for the `engine` extra and prerequisites,
-and [evaluation](evaluation.md) for the reference backend. TaH2's bundled
+and [evaluation](evaluation.md) for engine and reference benchmarks. TaH2's bundled
 `tah2/minisgl/` is a separate engine.
 
 ## Generate with the engine
@@ -33,7 +43,8 @@ import yaml
 from tah.engine import TaHEngine, Request, SamplingParams
 
 config = yaml.safe_load(open('script/tah/recipes/qwen3_1.7/eval_tah.yaml'))
-engine = TaHEngine('models/TaH-plus-1.7B', config_override=config)
+engine = TaHEngine('models/TaH-plus-1.7B', config_override=config,
+                   max_batch_size=1, graph_batch_sizes=[1])
 requests = [Request('<|im_start|>user\nWhat is 2 + 2?<|im_end|>\n<|im_start|>assistant\n',
                     max_new_tokens=128, seed=42)]
 results = engine.generate(requests, SamplingParams(temperature=.6, top_k=20, top_p=.95),
@@ -125,13 +136,16 @@ are no Dynamo graph breaks. The compiled function accepts dynamic row counts
 while CUDA graph replay remains exact-B. Prefill stays eager. `compile=False`
 runs the same decode path eagerly. Compile remains off by default: on the RTX
 3090, the selected exact-B profile reduced mean physical kernel time from the
-WP7 29.43 ms to 25.79 ms (12.4%), while W-perf measured 1325.33 tok/s versus
-WP7 1353.18 tok/s (2.1% slower). The selected capture set left most decode
+uncompiled 29.43 ms to 25.79 ms (12.4%), while W-perf measured 1325.33 tok/s versus
+uncompiled 1353.18 tok/s (2.1% slower). The selected capture set left most decode
 sizes on the compiled eager fallback; capturing all 64 sizes had not completed
 startup after five minutes. Compilation changes bf16 rounding, so compare
 compiled output under the corpus-matched generated G-TF rules, not to
 compile-disabled logits. `engine.last_run.compile` and each capture report
 compile wall time and the number of compiled graphs.
+Compile-on teacher-forced and greedy checks failed for the three-pass MLP
+checkpoint. Keep `compile: false` for accuracy benchmarks; the opt-in path is
+experimental and its faster kernels have not established end-to-end parity.
 
 Startup measures captures using a small temporary KV pool, destroys them, sizes
 the real KV pool from a fresh free-memory reading, then captures against its
@@ -169,6 +183,73 @@ scope. These are wall scopes, not additive GPU utilization. Each CUDA decode ste
 uses one status transfer to the host. Exact batch-size buckets keep fixed buffer
 shapes and a reusable unsplit FlashInfer plan; no per-step context-length scan
 runs in Python. Low batch sizes can leave the GPU underutilized in eager mode.
+
+## Evaluation, startup capture and the playground
+
+The evaluation harness passes every selected prompt in a job to one engine,
+including all datasets and repeats. `engine.max_batch_size` defaults to 64 in
+the harness, and is capped to `min(max_batch_size, number of job prompts)` before
+loading and capture. All constructor options above can be set in the eval YAML
+`engine` mapping or via `--engine-options` JSON. Sampling and TaH model overrides
+use the same top-level YAML fields as `--backend tah`. See [evaluation](evaluation.md)
+for precedence and explicit CLI memory controls.
+
+Capture is for **every exact B** in 1 through `max_batch_size`, at startup,
+unless `graph_batch_sizes` selects a subset. Capture both sizing and final
+rounds costs about 23 s at B64 on the 3090. Reuse one engine across datasets;
+constructing an engine per dataset repeats this cost. A one-prompt caller should
+use `max_batch_size=1, graph_batch_sizes=[1]`, as in the API example. Selecting a
+subset avoids those startup captures but uncaptured sizes use slower eager decode.
+
+The playground defaults to the engine with resident cap 1 and graph sizes `[1]`:
+
+```bash
+source .venv-tah/bin/activate
+CUDA_VISIBLE_DEVICES=0 python script/tah/playground/inference_example.py
+CUDA_VISIBLE_DEVICES=0 python script/tah/playground/inference_example.py --backend tah
+CUDA_VISIBLE_DEVICES=0 python script/tah/playground/inference_example.py --max-new-tokens 16384
+```
+
+Playground options: `--model` (Hub ID or local directory; default
+`nics-efc/TaH-plus-1.7B`), `--device` (`cuda:0`), `--backend` (`tah_engine` or
+`tah`; default engine), `--max-new-tokens` (512), `--seed` (42),
+`--engine-options` (JSON object with constructor options), and `-h`/`--help`.
+The demo applies the tokenizer's thinking chat template and prints each generated
+token coloured by its iteration count, plus the final text. Engine colouring is
+printed when generation completes; reference colouring is printed during its
+iteration loop. The engine path loads Hub snapshots outside the runtime loader.
+An engine environment-check failure points to `--backend tah`.
+
+## Long generations and host memory
+
+On roughly 30 GB RAM machines (the 3090 host and L40S VM), keep the live host
+swap budget at 8 GiB and reduce resident requests for long generation. This
+budget is pinned host RAM for KV/state; it does not configure the operating
+system's disk swap. For the
+1.7B checkpoint with prompts up to 3k tokens and a 16,384-token generation cap,
+use `max_batch_size: 4`, `memory_fraction: 0.9`, `host_swap_bytes: 8589934592`,
+`prefill_chunk_size: 128`, CUDA graphs enabled, and compile disabled. For
+prompts near 16k with another 16k generated tokens, use resident cap 2.
+These are conservative sizing recommendations; arbitrary prompt/pass mixes
+can require a smaller cap based on the startup `memory_budget.kv_capacity`.
+
+Each KV entry is 112 KiB for the 28-layer 1.7B checkpoint. A worst-case two-pass
+request with a 3k prompt and 16k generation needs about 38k entries (~4.1 GiB).
+Four such requests need about 153k entries; the small-cap auto-sized pool plus
+8 GiB host swap offers room for that bound on an otherwise idle 24 GB GPU.
+Choose a cap so worst-case total entries minus GPU capacity stays below the
+host budget, leaving room for per-request state, prompt tables, graders, weights
+and OS RAM. Requests must also fit the model context and fit the GPU pool alone.
+Lowering `memory_fraction` shrinks the GPU pool and can **increase** host swap.
+Increasing the swap budget on a RAM-limited host is not the first remedy.
+
+The B64 16k stress completed with 6.36 GiB live host swap of the 8 GiB budget;
+that observed mix is close to the budget and does not bound arbitrary outputs.
+Budget exhaustion raises an explicit error and preserves incremental outputs.
+The default 4 grading processes consume host RAM too; use `--grading-workers 2`
+if RAM is constrained. Monitor available RAM as well as GPU memory. Use these
+settings on the L40S VM after its environment/smoke checks; L40S portability
+and performance have not been measured locally.
 
 ## Engine validation and performance tools
 
@@ -255,6 +336,8 @@ default fixture capture behavior is unchanged.
 `--cuda-graphs` enables graphs (default); `--no-cuda-graphs` runs eager decode.
 `--compile` enables full-graph TorchInductor decode; `--no-compile` is the
 default. `--compile-cache-dir` selects its persistent cache directory.
+`engine_check --graph-batch-sizes` accepts comma-separated exact integer batch sizes, restricting
+captures; other sizes run eager.
 `--model-path` defaults to `models/TaH-plus-1.7B` for workload, smoke, swap and
 profile checks; fixture parity uses its recorded checkpoint paths.
 `--gate smoke` runs W-smoke (Math500 `[0,16)`, repeat 1, cap 1024), comparing
@@ -446,7 +529,7 @@ production gates.
 `EagerTaHModel` loads a local TaH v1 checkpoint into engine-owned modules and
 returns final logits for one complete sequence. It uses dense attention with
 temporary per-pass KV history, and keeps no KV between calls. Use this tool for
-validation; generation and scheduling are separate APIs still under development.
+validation; use `TaHEngine.generate` for scheduled generation.
 The model runtime does not import Transformers or PEFT model code.
 
 ```bash
@@ -570,7 +653,8 @@ with the full eager forward has one recorded failure: the single-pass
 checkpoint's token-by-token retained dense-row max error is 1.625 versus its
 1.359375 limit. A focused probe reproduces that difference in the reference's
 single-token versus full-sequence execution, with exact matching outputs for
-each corresponding layout. The recorded failure remains unresolved.
+each corresponding layout. This comparison is a diagnostic of reference
+layout noise; binding engine-versus-reference parity passes in both layouts.
 
 `model.forward_chunk(input_ids, pool, request, *, start_position=0,
 iter_count_labels=None, hidden_positions=None, decode=False)` accepts a nonempty
@@ -759,7 +843,8 @@ Reports are written to `data/engine/wp4/gtf/chunk{1,256}/`: `<checkpoint>.json`
 compares with the reference; `<checkpoint>-vs-wp3.json` compares with the full
 eager model. Each includes PASS/FAIL, comparisons, summary, `noise_limits` and
 `decision_limits`. A failed paired retained-coordinate assertion remains FAIL;
-neither limits nor reference files are changed by the test.
+neither limits nor reference files are changed by the test. This additional
+cross-layout comparison is diagnostic; reference comparison is the binding gate.
 
 ## Graph-safe sampling
 
@@ -775,7 +860,8 @@ PyTorch 2.6 kernel for that shape and dtype; rerun the tie tests when changing
 the execution environment. Bounded top-p uses FP64 shortlist arithmetic. A
 `top_p` chosen exactly from a full-vocabulary FP32 reference CDF can select an
 adjacent nucleus because the reference rounds its full-vocabulary reductions;
-strict parity for those deliberately rounded cutoffs is still open.
+such floating-point cutoff boundaries may resolve either way. Non-degenerate
+sampling distribution tests pass; outputs across backends need not be identical.
 `temperature=0` is greedy.
 
 Create parameter and request state before graph capture. When requests move,

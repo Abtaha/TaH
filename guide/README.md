@@ -2,7 +2,7 @@
 
 Start with [installation](installation.md), then [evaluation](evaluation.md) to run
 TaH benchmarks and [results](results.md) to inspect or compare their outputs.
-[Engine](engine.md) describes the status of the new TaH inference engine.
+[Engine](engine.md) covers generation, memory controls and validation of the TaH inference engine.
 These evaluation and results guides cover **TaH v1** (`tah/`); TaH2 has separate
 entrypoints and dependencies. See the main [README](../README.md#tah2-usage) for
 TaH2 training, offline/online evaluation, and serving examples.
@@ -18,10 +18,10 @@ saved results can run with `export CUDA_VISIBLE_DEVICES=""`.
 | `pyproject.toml` | Editable package install and dependency extras; use separate TaH and TaH2 environments. |
 | `tah/model/` | Reference TaH causal LM, selective iterations, LoRA, deciders, configuration, generation helper. |
 | `tah/train/`, `tah/utils/` | TaH trainer, collator, and data preparation utilities. |
-| `tah/evaluate/` | TaH dataset loading, three inference backends, job driver, math/code graders, results collector. |
+| `tah/evaluate/` | TaH dataset loading, four inference backends, job driver, math/code graders, results collector. |
 | `tah/evaluate/eval_configs/dataset_configs.json` | Benchmark names, sources, splits, fields, and prompt templates. |
-| `tah/engine/` | New TaH engine components and checks; generation integration is under development. |
-| `script/tah/playground/inference_example.py` | Reference generation demo with per-token iteration colors; prints to the console. |
+| `tah/engine/` | TaH v1 generation engine, continuous batching, graphs and swap; default eval backend. |
+| `script/tah/playground/inference_example.py` | Engine generation demo (reference flag available) with per-token iteration colors; prints to the console. |
 | `script/tah/evaluation/eval.py` | Benchmark CLI; see [evaluation](evaluation.md). |
 | `script/tah/evaluation/collect_results.py` | Saved-results CSV collector; see [results](results.md). |
 | `script/tah/preparation/` | Download training data, filter/split, label hard tokens, optionally prune a model. |
@@ -52,6 +52,6 @@ TaH2 output paths are controlled by its separate recipes and launchers.
 | Install extras, resolve import/JIT errors, check kernels | [installation.md](installation.md) |
 | Pick a backend/dataset, select rows, configure sampling/repeats/jobs | [evaluation.md](evaluation.md) |
 | Read CSV/JSON files, check completion, collect summaries, compare runs | [results.md](results.md) |
-| Understand what the new TaH engine will provide | [engine.md](engine.md) |
+| Generate with the engine, size memory, choose graphs, use validation tools | [engine.md](engine.md) |
 | Train TaH, prepare labels, run the generation demo | Main [README](../README.md#tah-usage) and [recipes](../script/tah/recipes/README.md) |
 | Train/evaluate/serve TaH2 | Main [README](../README.md#tah2-usage) and [mini-SGLang README](../tah2/minisgl/README.md) |

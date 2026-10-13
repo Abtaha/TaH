@@ -26,14 +26,14 @@ EvalPlus VCS dependency.
 | --- | --- |
 | `tah` | Reference model/scripts: torch 2.6.0, Transformers 4.52.4, PEFT 0.15.2, Accelerate, datasets, PyYAML. |
 | `evaluation` | Grading and backends: pylatexenc 2.10, sympy 1.13.1, math_verify, termcolor, SGLang >=0.4.6, EvalPlus pinned to commit `26d6d00bb1fd0fa37f39c99d5290da67891d1c5e` (the harness target, 0.4.0.dev44). Install alongside `tah`. |
-| `engine` | torch 2.6.0, Triton 3.2.0, flashinfer-python 0.2.5, Ninja 1.11.1.3, safetensors 0.8.0, tokenizers 0.21.4. Current checks/components; see [engine status](engine.md). |
+| `engine` | torch 2.6.0, Triton 3.2.0, flashinfer-python 0.2.5, Ninja 1.11.1.3, safetensors 0.8.0, tokenizers 0.21.4. TaH v1 generation and evaluation runtime; see [engine](engine.md). |
 | `training` | W&B, DeepSpeed 0.17.1, flash-attn 2.7.3; install alongside `tah` for training. Also supplies flash-attn for HF's optional `use_flash_attention`. |
 | `tah2` | TaH2 stack including torch 2.9.1, Transformers 4.57.3, Triton 3.5.1, flashinfer-python 0.6.4 and its train/eval/server dependencies; see `pyproject.toml` for the full pins. |
 | `dev` | pytest >=6 and Ruff >=0.11 for development checks. |
 
 Only select the extras needed for your workflow; installing the project without
 extras installs its packages but no runtime dependencies. Reference evaluation
-uses `.[tah,evaluation]`; the engine check additionally needs `engine`.
+uses `.[tah,evaluation]`; engine generation/evaluation additionally needs `engine`.
 For training:
 
 ```bash
@@ -98,6 +98,9 @@ in this order:
 | `Could not run CUDA compiler ...` | The detected compiler failed to run; inspect the reported OS/compiler error. |
 | `... nvcc ..., but PyTorch was built with CUDA ...` | Parsed CUDA major versions differ; select a matching toolkit through `PATH`/`CUDA_HOME`. |
 
+The evaluation and playground engine adapters add `Use --backend tah` to
+environment-check errors. That flag selects the preserved correctness reference.
+
 The nvcc/header/version checks run only when FlashInfer lacks prebuilt ops.
 Minor CUDA version equality is not required by this check. A successful import
 checks these prerequisites, not kernel correctness, free-memory sufficiency,
@@ -148,7 +151,7 @@ files, and raises on a numerical mismatch or absent CUDA.
 | HF `flash_attention_2` missing | Leave `use_flash_attention` false (the default), or install the pinned training extra with its build prerequisites. This option affects only `hf`. |
 | EvalPlus import mismatch | Install the `evaluation` extra's pinned commit, rather than replacing it with a different release. |
 | Local benchmark file missing | Check the paths in the [dataset table](evaluation.md#datasets); the editable install does not fetch `data/`. |
-| CUDA OOM while evaluating | Reduce YAML `batch_size`, especially for long prompts/repeats; see [crash behavior](evaluation.md#crashes-and-partial-results) before interpreting saved output. |
+| CUDA OOM while evaluating | For `tah_engine`, reduce `engine.max_batch_size` or `prefill_chunk_size` and inspect startup `memory_budget`; for the reference reduce YAML `batch_size`, especially for long prompts/repeats; see [crash behavior](evaluation.md#crashes-and-partial-results) before interpreting saved output. |
 
 Source of truth: [dependency extras](../pyproject.toml),
 [environment check](../tah/engine/__init__.py),
