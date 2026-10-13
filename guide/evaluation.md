@@ -418,3 +418,125 @@ Evaluations whose results go into the report follow the fixed protocol in
 [report/PROTOCOL.md](../report/PROTOCOL.md): which benchmarks, seeds, token
 limits and statistical analysis are used, and how new checkpoints are compared
 with the baseline.
+
+## Running and analyzing a report protocol
+
+The protocol runner calls the existing `eval.py` CLI. Its YAML combines a base
+eval recipe with named groups; each group can set datasets, row ranges or
+problem IDs, repeat count, generation cap, batch size, and other eval YAML
+overrides. The two shipped protocols are
+[`protocol_wacc.yaml`](../script/tah/recipes/qwen3_1.7/protocol_wacc.yaml)
+(R1, reference or engine) and
+[`protocol_paper.yaml`](../script/tah/recipes/qwen3_1.7/protocol_paper.yaml)
+(R2, engine). The protocol details and statistical rules are in
+[report/PROTOCOL.md](../report/PROTOCOL.md).
+
+Run each backend and seed into its own output root. This is the OOM-safe U3
+reference command; it uses batch 8 for prompts up to 675 tokens and batch 2 for
+`gpqa_82`, `gpqa_93`, `gpqa_128`, and `gpqa_166`. The merge runs after all groups
+finish:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 .venv-tah/bin/python script/tah/evaluation/run_protocol.py run \
+  --config script/tah/recipes/qwen3_1.7/protocol_wacc.yaml \
+  --model_path models/TaH-plus-1.7B --backend tah --seed 1234 \
+  --output_root data/engine/wacc_reference_protocol_seed1234 --logger_level WARNING \
+  && CUDA_VISIBLE_DEVICES=0 .venv-tah/bin/python script/tah/evaluation/run_protocol.py merge \
+  --output_root data/engine/wacc_reference_protocol_seed1234
+```
+
+If the process is interrupted, run the same `run` command again. The runner
+checks persisted `(problem_id, sample_idx)` rows and launches new sub-runs for
+only the missing pairs. When a problem is missing just one repeat, the
+sub-run generates one sample and maps it to that missing sample index. Inspect
+`protocol_state.json`, each group's `runs/*/command.json`, and its
+`runs/*/eval_config.yaml` to see the exact selection, command, config, and exit
+status. Completed groups are skipped. The separate `merge` command can be run
+again after an interrupted merge; it refuses groups with missing or duplicate
+pairs.
+
+Each group and resume sub-run receives the requested base seed. The current
+eval harness does not save and restore a single random-generator state across
+separate CLI invocations, so group boundaries, batch composition, and resumed
+prompt order can change sampled outputs relative to one uninterrupted run.
+The runner records every seed, selection, command, and derived config as run
+provenance.
+
+For each R1 engine seed, use the same W-acc config with a separate output root.
+For example, this runs seed 42; repeat with seeds `1234` and `2024`, changing
+both values:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 .venv-tah/bin/python script/tah/evaluation/run_protocol.py run \
+  --config script/tah/recipes/qwen3_1.7/protocol_wacc.yaml \
+  --model_path models/TaH-plus-1.7B --backend tah_engine --seed 42 \
+  --output_root data/engine/wacc_engine_seed42 --logger_level WARNING \
+  && CUDA_VISIBLE_DEVICES=0 .venv-tah/bin/python script/tah/evaluation/run_protocol.py merge \
+  --output_root data/engine/wacc_engine_seed42
+```
+
+The paper protocol uses one command per seed and a different output root:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 .venv-tah/bin/python script/tah/evaluation/run_protocol.py run \
+  --config script/tah/recipes/qwen3_1.7/protocol_paper.yaml \
+  --model_path models/TaH-plus-1.7B --backend tah_engine --seed 42 \
+  --output_root data/engine/paper_protocol_seed42 --logger_level WARNING \
+  && CUDA_VISIBLE_DEVICES=0 .venv-tah/bin/python script/tah/evaluation/run_protocol.py merge \
+  --output_root data/engine/paper_protocol_seed42
+```
+
+Repeat with seeds `1234` and `2024`, changing both `--seed` and the output-root
+suffix. R2 fixes all nine benchmarks and their token caps; AIME25 and AMC23 use
+eight samples per problem. The merge writes normal per-dataset run directories
+under `<output_root>/canonical/` for `compare_runs.py`.
+
+Compare the R1 reference against one or more engine seed runs. Repeating `--b`
+adds runs to the same candidate group. An optional `--c` group produces a
+reference-vs-reference comparison alongside the reference-vs-engine result.
+The margin defaults to three percentage points; `--margin 0.03` states it
+explicitly:
+
+```bash
+CUDA_VISIBLE_DEVICES='' .venv-tah/bin/python script/tah/evaluation/compare_runs.py equivalence \
+  --protocol-config script/tah/recipes/qwen3_1.7/protocol_wacc.yaml \
+  --a data/engine/wacc_reference_protocol_seed1234/canonical \
+  --b data/engine/wacc_engine_seed42/canonical \
+  --b data/engine/wacc_engine_seed1234/canonical \
+  --b data/engine/wacc_engine_seed2024/canonical \
+  --label-a Reference --label-b Engine-seeds \
+  --margin 0.03 --output-prefix data/engine/wacc_equivalence
+```
+
+The equivalence output reports candidate-minus-reference accuracy difference,
+paired problem-level SE, 95% and 90% confidence intervals, paired z, TOST verdict,
+and weighted passes-per-token ratio for each dataset and all 398 problems
+pooled. TOST is equivalent only when the full 90% interval lies inside the
+configured ±3 point margin. `equivalence_not_shown` means that interval did not
+fit inside the margin; it does not mean the backends are proven different.
+
+Aggregate the three R2 seed runs with the paper-value column from the protocol
+config:
+
+```bash
+CUDA_VISIBLE_DEVICES='' .venv-tah/bin/python script/tah/evaluation/compare_runs.py aggregate \
+  --protocol-config script/tah/recipes/qwen3_1.7/protocol_paper.yaml \
+  --run data/engine/paper_protocol_seed42/canonical \
+  --run data/engine/paper_protocol_seed1234/canonical \
+  --run data/engine/paper_protocol_seed2024/canonical \
+  --output-prefix data/engine/paper_aggregate
+```
+
+Aggregation pools sample outcomes across seeds, then computes each benchmark's
+mean and problem-level SE. The nine-benchmark average gives equal weight to
+each benchmark; its SE propagates the benchmark SEs. HumanEval+ and MBPP+
+scores require EvalPlus base and plus tests to pass, while pass statistics are weighted
+by generated tokens. The output includes the paper value and whether it falls
+inside the 95% interval; use `--no-paper-values` to omit those columns. Both
+commands write Markdown and JSON files using the requested output prefix.
+
+Before analysis, each input run must have exactly the protocol's expected
+`(problem_id, sample_idx)` pairs. The analyzer rejects failed run statuses,
+missing rows, duplicates, and incomplete EvalPlus results. Legacy run
+directories without `run_status.json` are accepted only when their rows still
+match the full expected key set.
