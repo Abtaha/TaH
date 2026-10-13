@@ -1,0 +1,66 @@
+{
+  "accuracy_se_factor": 2,
+  "compile_all_bucket_startup_lower_bound_seconds": 300,
+  "compile_startup_note": "Recorded interrupted attempt in notes/log/WP8.md; not a completed startup measurement.",
+  "confirmatory": {
+    "confidence": 0.9,
+    "engine_seeds": [
+      42,
+      1234,
+      2024
+    ],
+    "equivalence_margin_pp": 3,
+    "max_new_tokens": 4096,
+    "problems": {
+      "gpqa": 198,
+      "math500": 200
+    },
+    "reference_seed": 1234,
+    "repeats": 2
+  },
+  "generated_mlp_count_floor": 2,
+  "greedy_median_factor": 0.5,
+  "margin_floor": 0.01,
+  "noise_multiplier": 1.5,
+  "note": "Method constants transcribed from notes/SPEC.md and report/PROTOCOL.md; these are policy, not measured results. Historical limit changes are discussed in README.",
+  "pass_relative_margin": 0.1,
+  "performance_target": 5,
+  "reproduction": {
+    "accuracy": {
+      "device": "GPU; resumable groups",
+      "runtime": "12\u201317 h"
+    },
+    "diagnostics": {
+      "device": "GPU",
+      "runtime": "11\u201315 min"
+    },
+    "equivalence": {
+      "device": "GPU",
+      "runtime": "2\u20134 h"
+    },
+    "exploratory": {
+      "device": "CPU",
+      "runtime": "seconds"
+    },
+    "fixtures": {
+      "device": "GPU + CPU preparation",
+      "runtime": "30\u201345 min"
+    },
+    "negative": {
+      "device": "GPU",
+      "runtime": "20\u201335 min"
+    },
+    "reference": {
+      "device": "GPU",
+      "runtime": "72\u201385 min"
+    },
+    "robustness": {
+      "device": "GPU",
+      "runtime": "25\u201330 min"
+    },
+    "speed": {
+      "device": "GPU",
+      "runtime": "18\u201325 min"
+    }
+  }
+}
