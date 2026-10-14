@@ -40,6 +40,7 @@ from tqdm import tqdm
 from transformers.utils import logging as hf_logging
 
 from tah.evaluate import codeeval, matheval
+from tah.evaluate.code_prompts import extract_tah2_code, make_tah2_prompt
 from tah.evaluate.backends import cleanup, setup_backend
 from tah.evaluate.datasets import load_combined_dataset
 
@@ -73,22 +74,32 @@ def _build_problem(item: dict, idx: int, field_mapping: Dict, detail_dir: Path) 
     pid = str(item.get(field_mapping["id_field"]) or f"problem_{idx}")
     text = str(item.get(field_mapping["question_field"], "")).strip()
     answer = str(item.get(field_mapping["answer_field"], "")).strip()
+    answer_type = item.get("_source_answer_type", field_mapping.get("answer_type", "boxed"))
     problem_dir = detail_dir / pid
     problem_dir.mkdir(parents=True, exist_ok=True)
     return {
         "problem_id": pid,
         "dataset_name": item.get("_source_dataset", field_mapping.get("dataset_names", [""])[0]),
-        "answer_type": item.get("_source_answer_type", field_mapping.get("answer_type", "boxed")),
+        "answer_type": answer_type,
         "original_problem_id": item.get("_original_id", pid),
         "problem_text": text,
         "correct_answer": answer,
         "problem_dir": problem_dir,
         "entry_point": item.get("entry_point"),
+        # The loader preserves MBPP assertions verbatim as _original_assertion.
+        # HumanEval's test is also carried by TaH2, but its template ignores it.
+        "assertion": item.get("assertion", item.get(
+            "_original_test" if answer_type == "humaneval" else "_original_assertion", "")),
     }
 
 
-def _make_prompt(text: str, tokenizer, *, is_code: bool) -> str:
+def _make_prompt(text: str, tokenizer, *, is_code: bool, code_prompt: str = "harness",
+                 answer_type: str = "", assertion: str = "") -> str:
+    if code_prompt not in ("harness", "tah2"):
+        raise ValueError("code_prompt must be 'harness' or 'tah2'")
     if is_code:
+        if code_prompt == "tah2":
+            return make_tah2_prompt(text, assertion, answer_type, tokenizer)
         return codeeval.make_raw_chat_prompt_for_code_evaluation(
             task_prompt=text, reasoning=False, tokenizer=tokenizer,
         )
@@ -143,13 +154,16 @@ def _job_output_dir(output_dir: str, dataset_name: str, backend: str,
 
 def _build_prompts(
     problems: List[dict], tokenizer, repeat_size: int, is_code: bool,
+    *, code_prompt: str = "harness",
 ) -> Tuple[List[str], List[Tuple[int, int]]]:
     """Render each problem ``repeat_size`` times and return
     ``(prompts, prompt_to_problem)`` where ``prompt_to_problem[i] = (problem_idx, sample_idx)``."""
     prompts: List[str] = []
     prompt_to_problem: List[Tuple[int, int]] = []
     for pi, p in enumerate(problems):
-        rendered = _make_prompt(p["problem_text"], tokenizer, is_code=is_code)
+        rendered = _make_prompt(p["problem_text"], tokenizer, is_code=is_code,
+                                code_prompt=code_prompt, answer_type=p.get("answer_type", ""),
+                                assertion=p.get("assertion", ""))
         for s in range(repeat_size):
             prompts.append(rendered)
             prompt_to_problem.append((pi, s))
@@ -206,7 +220,8 @@ def _process_result(
         "is_correct": ok,
     }
     if is_code:
-        extracted = codeeval.sanitize(output_text, p["entry_point"])
+        extracted = (extract_tah2_code(output_text) if p.get("code_prompt", "harness") == "tah2"
+                     else codeeval.sanitize(output_text, p["entry_point"]))
         detail["extracted_code"] = extracted
         detail["entry_point"] = p["entry_point"]
         _append_code_solution(p["output_dir"] / "code_solutions.jsonl", p["original_problem_id"], extracted)
@@ -290,6 +305,9 @@ def run_single_job(
     """Run one backend instance for this job and write each dataset separately."""
     from transformers import AutoTokenizer
 
+    code_prompt = config.get("code_prompt", "harness")
+    if code_prompt not in ("harness", "tah2"):
+        raise ValueError("code_prompt must be 'harness' or 'tah2'")
     dataset_names = dataset_names or field_mapping.get("dataset_names") or [combined_dataset_name]
     dataset_ranges = dataset_ranges or {}
     print(f"Job {job_id+1}/{job_nums}: {len(problems_data)} problems, backend={backend}, datasets={dataset_names}")
@@ -317,12 +335,16 @@ def run_single_job(
         (job_out / "details").mkdir(parents=True, exist_ok=True)
         problem = _build_problem(item, item.get("_original_index", start_idx + i), item_mapping, job_out / "details")
         problem["output_dir"] = ds_out
+        problem["code_prompt"] = code_prompt
         problems.append(problem)
 
     prompts: List[str] = []
     prompt_to_problem: List[Tuple[int, int]] = []
     for pi, problem in enumerate(problems):
-        rendered = _make_prompt(problem["problem_text"], tokenizer, is_code=problem["answer_type"] in _CODE_ANSWER_TYPES)
+        rendered = _make_prompt(
+            problem["problem_text"], tokenizer, is_code=problem["answer_type"] in _CODE_ANSWER_TYPES,
+            code_prompt=code_prompt, answer_type=problem["answer_type"], assertion=problem["assertion"],
+        )
         for sample_idx in range(config["repeat_size"]):
             prompts.append(rendered)
             prompt_to_problem.append((pi, sample_idx))

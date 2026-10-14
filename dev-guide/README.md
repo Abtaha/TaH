@@ -6,6 +6,7 @@ For people changing the code: how the internals fit together and how to check th
 |---|---|
 | [engine.md](engine.md) | anything in `tah/engine/` — modules, test suite, parity/validation tools, cache/attention APIs, overlap scheduler, sampling internals |
 | [validation.md](validation.md) | anything in `script/tah/validation/` — oracle measurement (R1-O1), coupled-sampling primitives, how to run the oracle evaluation |
+| [evaluation.md](evaluation.md) | `tah/evaluate/` and `script/tah/evaluation/` — dataset mapping, prompts, grading, protocol runner and analysis |
 
 ## Conventions (keep this guide small)
 

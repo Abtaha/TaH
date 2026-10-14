@@ -89,6 +89,14 @@ unextracted answers are incorrect. Code prompts ask for a self-contained Python
 script in a markdown block; outputs are sanitized using each task's entry point.
 If a code tokenizer has no chat template, the task prompt is used directly.
 
+YAML `code_prompt` selects `harness` (default, existing prompts and sanitization)
+or `tah2` for HumanEval/MBPP. `tah2` uses the authors' benchmark-specific reasoning
+templates with a generation prompt and no assistant response priming or
+`enable_thinking` override. MBPP test cases come from the local row's `assertion`
+field, preserved verbatim; the embedded example in `prompt` is retained too.
+Outputs use TaH2's Python-block extraction without additional sanitization;
+EvalPlus graders are unchanged. Other datasets ignore this setting.
+
 ## Selecting rows and repeats
 
 Use comma-separated `--dataset_name` to share one backend load across datasets:
@@ -277,6 +285,8 @@ merges the groups into ordinary dataset directories:
   the reference (`--backend tah`) or the engine (`--backend tah_engine`).
 - [`protocol_paper.yaml`](../script/tah/recipes/qwen3_1.7/protocol_paper.yaml): R2,
   the engine only, with all nine benchmarks and eight samples per problem for AIME25 and AMC23.
+- [`protocol_paper_code_tah2.yaml`](../script/tah/recipes/qwen3_1.7/protocol_paper_code_tah2.yaml):
+  R2's code-prompt amendment, HumanEval+ and MBPP+ only, one sample at 8192 tokens.
 
 Run each backend and seed into its own output root; `run` and `merge` are separate
 commands (the example is the R1 engine run at seed 42):
