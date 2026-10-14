@@ -246,9 +246,23 @@ coverage and marks `run_status.json` `complete` or `failed`. A failed worker,
 missing report or coverage mismatch exits nonzero and keeps partial results and
 worker directories. A failure in one job marks the whole session failed.
 
-Status is updated at combination, not after each sample. For live progress, read
-the worker CSVs and console output. A hard kill can leave `running` with no combined
-files. Treat runs without `run_status.json` as unverified.
+Status is updated at combination, not after each sample. Each job shows one tqdm
+bar over finished samples, with tqdm's sample rate, elapsed time and ETA. It writes
+to stdout about every 10 seconds, including while no samples have finished, and
+prints the final state. Redirect stdout and stderr to one log and watch with
+`tail -f` (as below).
+
+`tah_engine` adds `865 tok/s (60s), 812 avg`: gross generated tokens per wall-clock
+second, including in-flight, swapped, finished and restart-discarded tokens; prompt
+tokens and EOS are excluded. The first number covers the last 60 seconds (the
+available interval at startup); the second averages this job's generation call.
+Both exclude model setup and warmup, include prefills, swaps and callbacks, and stop
+when generation returns, before the grading tail. Counts are sampled every five
+seconds and displayed on the bar's next refresh. Backends without a live counter show
+the same sample bar without the token postfix. For persisted timing and net output
+throughput, see [job timing](results.md#job-timing-and-engine-telemetry).
+A hard kill can leave `running` with no combined files. Treat runs without
+`run_status.json` as unverified.
 
 There is **no resume** for an evaluation: a rerun gets a new timestamp and starts
 the selected workload again. To continue after an interruption, keep the old output,
@@ -267,6 +281,12 @@ mkdir -p data/eval_smoke_detached
 tmux new-session -d -s tah-eval -c "$PWD" \
   "bash -c 'set -o pipefail; CUDA_VISIBLE_DEVICES=0 .venv-tah/bin/python script/tah/evaluation/eval.py --eval_config data/eval_configs/smoke.yaml --model_path nics-efc/TaH-plus-1.7B --dataset_name gsm8k --backend tah_engine --job_nums 1 --tp_size_per_job 1 --data_range 5 --output_dir data/eval_smoke_detached 2>&1 | tee data/eval_smoke_detached/console.log'"
 tmux attach-session -r -t tah-eval
+```
+
+To watch the redirected log without attaching:
+
+```bash
+tail -f data/eval_smoke_detached/console.log
 ```
 
 For a snapshot without attaching, use `tmux capture-pane -p -S -30 -t tah-eval`.
@@ -309,6 +329,14 @@ Merged directories are written under `<output_root>/canonical/`.
 - **Seeds:** resumed sub-runs and group boundaries can change sampled outputs relative
   to one uninterrupted run, because the harness does not save generator state between
   invocations. The runner records each seed, selection, command and config.
+
+Resume and merge count a pair only from its unique flushed CSV row and matching
+raw record in the same dataset directory, including completed samples from failed
+or interrupted sub-runs. Raw records without a CSV row in a `running` or `failed`
+directory are regenerated; they never replace the CSV-backed copy. Merge lists
+every dropped record and its retained source, and writes counts, IDs and source
+files to `canonical/merge_provenance.json`. Duplicate CSV-backed pairs, missing
+raw records, unexpected pairs and other unexplained mismatches remain errors.
 
 Compare the R1 reference with engine seeds. `--margin` defaults to 0.03 (three points):
 

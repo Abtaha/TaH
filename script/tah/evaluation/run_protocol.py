@@ -213,34 +213,51 @@ def load_protocol(protocol_path: Path) -> tuple[dict, dict, list[dict]]:
     return protocol, base, normalized
 
 
-def load_run_rows(run_dir: Path, remap_sample_idx: int | None = None) -> tuple[list[dict], list[dict]]:
-    """Read eval output rows, preferring combined files over worker files."""
+def _read_run_artifacts(run_dir: Path, remap_sample_idx: int | None = None) -> tuple[list[tuple[dict, dict]], list[tuple[dict, dict]]]:
+    """Read CSV/raw artifacts with locations; combined files supersede workers."""
     leaves: list[tuple[Path, list[Path]]] = []
-    seen_dirs: set[Path] = set()
-    for status_file in run_dir.rglob("run_status.json"):
+    for status_file in sorted(run_dir.rglob("run_status.json")):
         leaf = status_file.parent
         combined = leaf / "detailed_results.csv"
         csvs = [combined] if combined.exists() else sorted(leaf.glob("job_*/detailed_results.csv"))
-        if csvs:
-            leaves.append((leaf, csvs))
-            seen_dirs.add(leaf)
+        # Include empty interrupted leaves, whose raw records still need auditing.
+        leaves.append((leaf, csvs))
     if not leaves:
         # Legacy canonical run directories often have no run_status.json.
-        csvs = [p for p in run_dir.rglob("detailed_results.csv") if "job_" not in p.parts]
+        csvs = [p for p in sorted(run_dir.rglob("detailed_results.csv"))
+                if not any(part.startswith("job_") for part in p.relative_to(run_dir).parts)]
         leaves = [(p.parent, [p]) for p in csvs]
 
-    rows: list[dict] = []
-    samples: list[dict] = []
+    # Unknown raw-only leaves cannot be silently omitted from duplicate auditing.
+    leaf_dirs = {leaf for leaf, _ in leaves}
+    for path in run_dir.rglob("samples.jsonl"):
+        if path.parent not in leaf_dirs:
+            raise ValueError(f"raw samples in unknown leaf: {path}")
+    for path in run_dir.rglob("sample_*.json"):
+        if not any(parent.name.startswith("job_") and parent.parent in leaf_dirs
+                   for parent in path.parents):
+            raise ValueError(f"raw sample in unknown leaf: {path}")
+
+    rows: list[tuple[dict, dict]] = []
+    samples: list[tuple[dict, dict]] = []
     for leaf, csvs in leaves:
+        status_path = leaf / "run_status.json"
+        status = json.loads(status_path.read_text(encoding="utf-8")).get("status") if status_path.exists() else None
+
+        def source(path: Path, line: int | None) -> dict:
+            return {"file": str(path), "line": line, "leaf": str(leaf), "leaf_status": status}
+
         for csv_path in csvs:
             with csv_path.open(newline="", encoding="utf-8") as f:
-                for row in csv.DictReader(f):
+                for line, row in enumerate(csv.DictReader(f), 2):
                     if not row.get("problem_id"):
                         continue
                     row["sample_idx"] = int(row["sample_idx"])
                     if remap_sample_idx is not None:
+                        if row["sample_idx"] != 0:
+                            raise ValueError(f"nonzero local sample index in one-repeat resume: {csv_path}:{line}")
                         row["sample_idx"] = remap_sample_idx
-                    rows.append(row)
+                    rows.append((row, source(csv_path, line)))
 
         sample_files = [leaf / "samples.jsonl"]
         sample_files = [p for p in sample_files if p.exists()]
@@ -249,23 +266,109 @@ def load_run_rows(run_dir: Path, remap_sample_idx: int | None = None) -> tuple[l
         for sample_file in sample_files:
             if sample_file.suffix == ".jsonl":
                 with sample_file.open(encoding="utf-8") as f:
-                    for line in f:
-                        if line.strip():
-                            item = json.loads(line)
+                    for line, text in enumerate(f, 1):
+                        if text.strip():
+                            item = json.loads(text)
                             if remap_sample_idx is not None:
+                                if sample_key(item)[1] != 0:
+                                    raise ValueError(f"nonzero local raw sample index in one-repeat resume: {sample_file}:{line}")
                                 item["sample"] = remap_sample_idx
-                            samples.append(item)
+                            samples.append((item, source(sample_file, line)))
             else:
                 item = json.loads(sample_file.read_text(encoding="utf-8"))
                 item["id"] = item.get("problem_id", sample_file.parent.name)
                 try:
                     item["sample"] = int(sample_file.stem.split("_")[-1])
-                except ValueError:
-                    continue
+                except ValueError as exc:
+                    raise ValueError(f"invalid raw sample filename: {sample_file}") from exc
                 if remap_sample_idx is not None:
+                    if item["sample"] != 0:
+                        raise ValueError(f"nonzero local raw sample index in one-repeat resume: {sample_file}")
                     item["sample"] = remap_sample_idx
-                samples.append(item)
+                samples.append((item, source(sample_file, None)))
     return rows, samples
+
+
+def sample_key(sample: dict) -> tuple[str, int]:
+    return str(sample.get("problem_id", sample.get("id", ""))), int(sample.get("sample", sample.get("sample_idx", 0)))
+
+
+def _load_completed_attempt(run_dir: Path, remap: int | None) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+    """A flushed CSV row commits its same-leaf raw record, even in a failed run.
+
+    Only unbacked raw records in running/failed leaves may be discarded. Never
+    resolve competing committed rows, missing raw records, or same-attempt raw
+    duplicates by ordering, text or grades.
+    """
+    row_artifacts, raw_artifacts = _read_run_artifacts(run_dir, remap)
+    rows = [row for row, _ in row_artifacts]
+    row_map = ensure_unique_rows(rows, str(run_dir))
+    row_sources = {key_of(row): location for row, location in row_artifacts}
+    raw_map: dict[tuple[str, int], tuple[dict, dict]] = {}
+    for sample, location in raw_artifacts:
+        key = sample_key(sample)
+        if key in raw_map:
+            raise ValueError(f"duplicate raw sample object {key} in {run_dir}")
+        raw_map[key] = sample, location
+    missing = set(row_map) - set(raw_map)
+    if missing:
+        raise ValueError(f"CSV rows without raw samples in {run_dir}: {sorted(missing)[:10]}")
+    samples, selected, dropped = [], [], []
+    for key, (sample, location) in raw_map.items():
+        if key in row_map:
+            if location["leaf"] != row_sources[key]["leaf"]:
+                raise ValueError(f"CSV/raw source leaf mismatch for {key} in {run_dir}")
+            if sample.get("grading_status") == "pending":
+                raise ValueError(f"CSV row backed by pending raw sample {key} in {run_dir}")
+            samples.append(sample)
+            selected.append({"problem_id": key[0], "sample_idx": key[1],
+                             "csv": row_sources[key], "raw": location})
+        else:
+            if location["leaf_status"] not in {"running", "failed"}:
+                raise ValueError(f"raw sample without CSV row {key} in verified/unknown leaf: {location['file']}")
+            dropped.append({"problem_id": key[0], "sample_idx": key[1],
+                            "raw": location, "reason": "no_flushed_csv_row_in_interrupted_leaf"})
+    return rows, samples, selected, dropped
+
+
+def load_run_rows(run_dir: Path, remap_sample_idx: int | None = None) -> tuple[list[dict], list[dict]]:
+    """Read only CSV-committed samples, using the same rule as run and merge."""
+    rows, samples, _, _ = _load_completed_attempt(run_dir, remap_sample_idx)
+    return rows, samples
+
+
+def load_group_records(output_root: Path, group_state: dict) -> tuple[list[dict], list[dict], dict]:
+    """Resolve sources for run/resume and merge, including legacy protocol state."""
+    rows, samples, selected, dropped = [], [], [], []
+    expected = {(str(pid), int(idx)) for keys in group_state["expected_keys"].values()
+                for pid, idx in keys}
+    for record in group_state["runs"]:
+        attempt = output_root / record["attempt_dir"]
+        attempt_rows, attempt_samples, committed, uncommitted = _load_completed_attempt(
+            attempt, record.get("sample_index_remap"))
+        if uncommitted and record.get("exit_code") == 0:
+            raise ValueError(f"successful sub-run has uncommitted raw samples: {attempt}")
+        rows.extend(attempt_rows)
+        samples.extend(attempt_samples)
+        for entries in (committed, uncommitted):
+            for entry in entries:
+                entry["attempt_dir"] = record["attempt_dir"]
+                for kind in ("csv", "raw"):
+                    if kind in entry:
+                        for field in ("file", "leaf"):
+                            entry[kind][field] = str(Path(entry[kind][field]).relative_to(output_root))
+        selected.extend(committed)
+        dropped.extend(uncommitted)
+    unique = ensure_unique_rows(rows, "protocol group sub-runs")
+    all_keys = set(unique) | {(entry["problem_id"], entry["sample_idx"]) for entry in dropped}
+    if all_keys - expected:
+        raise ValueError(f"unexpected sample pairs in protocol group: {sorted(all_keys - expected)[:10]}")
+    winners = {(entry["problem_id"], entry["sample_idx"]): entry for entry in selected}
+    for entry in dropped:
+        entry["kept_source"] = winners.get((entry["problem_id"], entry["sample_idx"]))
+    return rows, samples, {"selected_sources": selected, "dropped_records": dropped,
+                           "selected_count": len(selected), "dropped_count": len(dropped),
+                           "dropped_duplicate_count": sum(entry["kept_source"] is not None for entry in dropped)}
 
 
 def key_of(row: dict) -> tuple[str, int]:
@@ -358,14 +461,8 @@ def main_run(args: argparse.Namespace) -> int:
             for dataset_keys in group_state["expected_keys"].values()
             for pid, sample in dataset_keys
         }
-        already: dict[tuple[str, int], dict] = {}
-        for run_record in group_state["runs"]:
-            attempt = output_root / run_record["attempt_dir"]
-            rows, _ = load_run_rows(attempt, run_record.get("sample_index_remap"))
-            for key, row in ensure_unique_rows(rows, str(attempt)).items():
-                if key in already:
-                    raise ValueError(f"duplicate completed pair {key} across group sub-runs: {group['name']}")
-                already[key] = row
+        rows, _, _ = load_group_records(output_root, group_state)
+        already = ensure_unique_rows(rows, f"protocol group {group['name']}")
         unexpected = set(already) - expected_keys
         if unexpected:
             raise ValueError(f"group {group['name']} produced unexpected sample pairs: {sorted(unexpected)[:10]}")
@@ -492,14 +589,8 @@ def main_run(args: argparse.Namespace) -> int:
                 raise RuntimeError(f"eval.py failed for protocol group {group['name']} (exit {completed.returncode}); rerun the same command to resume")
 
             # Refresh before planning the next missing slot.
-            rows, _ = load_run_rows(attempt_dir, remap)
-            attempt_keys = set(ensure_unique_rows(rows, str(attempt_dir)))
-            if not attempt_keys.issubset(expected_keys):
-                raise ValueError(f"eval.py produced unexpected keys in group {group['name']}: {sorted(attempt_keys - expected_keys)[:10]}")
-            for key in attempt_keys:
-                if key in already:
-                    raise ValueError(f"resume sub-run duplicated completed pair {key} in group {group['name']}")
-                already[key] = next(row for row in rows if key_of(row) == key)
+            rows, _, _ = load_group_records(output_root, group_state)
+            already = ensure_unique_rows(rows, f"protocol group {group['name']}")
             missing = expected_keys - set(already)
 
         if args.plan_only:
@@ -578,7 +669,7 @@ def main_merge(args: argparse.Namespace) -> int:
     state = json.loads(state_path.read_text(encoding="utf-8"))
     if state.get("status") != "complete":
         raise ValueError(f"protocol run is {state.get('status')!r}; finish/resume all groups before merge")
-    protocol = load_yaml(Path(state["protocol_config"]))
+    load_yaml(Path(state["protocol_config"]))
     groups = [
         {"name": name, "datasets": value["datasets"], "repeat_size": value["repeat_size"],
          "selected_indices": value["selected_indices"]}
@@ -590,15 +681,14 @@ def main_merge(args: argparse.Namespace) -> int:
     samples_by_dataset: dict[str, list[dict]] = {}
     code_eval_by_dataset: dict[str, dict[str, list[dict]]] = {}
     group_coverage: dict[str, list[dict]] = {}
+    provenance = {
+        "rule": "unique_flushed_csv_source_with_same_leaf_raw; discard_only_unbacked_interrupted_raw",
+        "groups": {},
+    }
     for group in groups:
         group_state = state["groups"][group["name"]]
-        group_rows: list[dict] = []
-        group_samples: list[dict] = []
-        for run_record in group_state["runs"]:
-            attempt = output_root / run_record["attempt_dir"]
-            rows, samples = load_run_rows(attempt, run_record.get("sample_index_remap"))
-            group_rows.extend(rows)
-            group_samples.extend(samples)
+        group_rows, group_samples, group_provenance = load_group_records(output_root, group_state)
+        provenance["groups"][group["name"]] = group_provenance
         unique = ensure_unique_rows(group_rows, f"protocol group {group['name']}")
         expected = {
             (str(pid), int(sample))
@@ -607,6 +697,14 @@ def main_merge(args: argparse.Namespace) -> int:
         }
         if set(unique) != expected:
             raise ValueError(f"group {group['name']} coverage mismatch: expected {len(expected)}, got {len(unique)}; missing={sorted(expected-set(unique))[:10]}, extra={sorted(set(unique)-expected)[:10]}")
+        print(f"SOURCES {group['name']}: {group_provenance['selected_count']} selected, "
+              f"{group_provenance['dropped_count']} dropped raw records "
+              f"({group_provenance['dropped_duplicate_count']} duplicates)")
+        for dropped in group_provenance["dropped_records"]:
+            kept = dropped["kept_source"]
+            print(f"DROP {group['name']} ({dropped['problem_id']}, {dropped['sample_idx']}): "
+                  f"{dropped['raw']['file']}:{dropped['raw']['line']} "
+                  f"[{dropped['reason']}] → keep {kept['raw']['file']}:{kept['raw']['line']}")
         for dataset, keys in group_state["expected_keys"].items():
             expected_by_dataset.setdefault(dataset, set())
             duplicate = expected_by_dataset[dataset].intersection((pid, int(s)) for pid, s in keys)
@@ -640,6 +738,10 @@ def main_merge(args: argparse.Namespace) -> int:
     timestamp = timestamp.replace("+00:00", "Z")
     canonical_root = output_root / "canonical"
     canonical_root.mkdir(parents=True, exist_ok=True)
+    provenance["selected_count"] = sum(g["selected_count"] for g in provenance["groups"].values())
+    provenance["dropped_count"] = sum(g["dropped_count"] for g in provenance["groups"].values())
+    provenance["dropped_duplicate_count"] = sum(g["dropped_duplicate_count"] for g in provenance["groups"].values())
+    write_json(canonical_root / "merge_provenance.json", provenance)
     for dataset, expected in expected_by_dataset.items():
         rows = rows_by_dataset.get(dataset, [])
         actual = ensure_unique_rows(rows, f"canonical {dataset}")
@@ -757,6 +859,7 @@ def main_merge(args: argparse.Namespace) -> int:
 
     write_json(canonical_root / "protocol_manifest.json", {
         "protocol": state["protocol_name"], "protocol_config": state["protocol_config"],
+        "merge_provenance": "merge_provenance.json",
         "protocol_config_sha256": state["protocol_config_sha256"],
         "eval_config_sha256": state["eval_config_sha256"],
         "model_path": state["model_path"], "backend": state["backend"], "seed": state["seed"],

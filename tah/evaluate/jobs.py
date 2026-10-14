@@ -30,19 +30,19 @@ import threading
 import time
 import traceback
 from multiprocessing import Process, Queue
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 import multiprocessing as mp
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import yaml
-from tqdm import tqdm
 from transformers.utils import logging as hf_logging
 
 from tah.evaluate import codeeval, matheval
 from tah.evaluate.code_prompts import extract_tah2_code, make_tah2_prompt
 from tah.evaluate.backends import cleanup, setup_backend
 from tah.evaluate.datasets import load_combined_dataset
+from tah.evaluate.progress import SampleProgress
 
 # Spawn is required for CUDA-capable subprocess workers.
 mp.set_start_method("spawn", force=True)
@@ -120,6 +120,13 @@ def _score_one(output_text: str, correct: str, dataset_name: str, *, is_code: bo
     if predicted == "No extracted answer":
         return "", False, bool(is_correct)
     return predicted, True, bool(is_correct)
+
+
+def _extract_code(output_text: str, code_prompt: str, entry_point: str) -> str:
+    """Solution submitted to EvalPlus for one code output."""
+    if code_prompt == "tah2":
+        return extract_tah2_code(output_text)
+    return codeeval.sanitize(output_text, entry_point)
 
 
 def _append_code_solution(path: Path, task_id: str, code: str) -> None:
@@ -202,8 +209,12 @@ def _process_result(
     writers: Dict[str, Tuple[object, csv.DictWriter]],
     all_results: Dict[str, List[dict]],
     scored=None,
+    extracted=None,
 ) -> None:
-    """Grade and persist a single result, safe to call from a backend callback."""
+    """Grade and persist a single result, safe to call from a backend callback.
+
+    ``scored``/``extracted`` come from a grading worker; otherwise both are computed here.
+    """
     output_text, proc_time, pass_counts = _normalise_inference_result(backend_result)
     pi, sample_idx = prompt_to_problem[prompt_idx]
     p = problems[pi]
@@ -220,8 +231,8 @@ def _process_result(
         "is_correct": ok,
     }
     if is_code:
-        extracted = (extract_tah2_code(output_text) if p.get("code_prompt", "harness") == "tah2"
-                     else codeeval.sanitize(output_text, p["entry_point"]))
+        if extracted is None:
+            extracted = _extract_code(output_text, p.get("code_prompt", "harness"), p["entry_point"])
         detail["extracted_code"] = extracted
         detail["entry_point"] = p["entry_point"]
         _append_code_solution(p["output_dir"] / "code_solutions.jsonl", p["original_problem_id"], extracted)
@@ -274,6 +285,15 @@ def _score_timed(output, answer, dataset, is_code):
     started = time.perf_counter()
     score = _score_one(output, answer, dataset, is_code=is_code)
     return score, time.perf_counter() - started
+
+
+def _grade_timed(output, answer, dataset, is_code, code_prompt, entry_point):
+    # Code extraction runs here, not on the backend callback thread: EvalPlus sanitize
+    # takes minutes on a length-capped output and would stall generation.
+    started = time.perf_counter()
+    score = _score_one(output, answer, dataset, is_code=is_code)
+    extracted = _extract_code(output, code_prompt, entry_point) if is_code else None
+    return score, extracted, time.perf_counter() - started
 
 
 def _save_pending_result(index, result, mapping, problems):
@@ -369,17 +389,27 @@ def run_single_job(
     inference_seconds = 0.0
     run_started = time.perf_counter()
 
-    def persist(index, result, score):
+    def persist(index, result, score, extracted=None):
         _process_result(index, result, prompt_to_problem, problems, tokenizer, writers, all_results,
-                        scored=score)
+                        scored=score, extracted=extracted)
 
     def drain(futures):
         nonlocal grading_work_seconds
         for future in futures:
             index, result = pending.pop(future)
-            score, seconds = future.result()
+            score, extracted, seconds = future.result()
             grading_work_seconds += seconds
-            persist(index, result, score)
+            persist(index, result, score, extracted)
+
+    def done_prefix():
+        # Persist in callback order: a slow code extraction holds back later rows instead
+        # of letting them overtake it, so CSV and code_solutions.jsonl order is unchanged.
+        ready = []
+        for future in pending:
+            if not future.done():
+                break
+            ready.append(future)
+        return ready
 
     def process(index, result):
         nonlocal grading_work_seconds, grading_inline_seconds
@@ -389,8 +419,9 @@ def run_single_job(
         args = (text, p["correct_answer"], p["dataset_name"], p["answer_type"] in _CODE_ANSWER_TYPES)
         if pool is not None:
             _save_pending_result(index, result, prompt_to_problem, problems)
-            pending[pool.submit(_score_timed, *args)] = (index, result)
-            drain([future for future in pending if future.done()])
+            future = pool.submit(_grade_timed, *args, p.get("code_prompt", "harness"), p.get("entry_point"))
+            pending[future] = (index, result)
+            drain(done_prefix())
         else:
             score, seconds = _score_timed(*args)
             grading_work_seconds += seconds
@@ -398,47 +429,47 @@ def run_single_job(
             persist(index, result, score)
 
     try:
-        if getattr(infer, "supports_callback", False):
-            callback_lock = threading.Lock()
-            seen_results = set()
+        with SampleProgress(len(prompts), job_id, getattr(infer, "progress_snapshot", None)) as progress:
+            if getattr(infer, "supports_callback", False):
+                callback_lock = threading.Lock()
+                seen_results = set()
 
-            def on_result(index, result):
-                index = int(index)
-                if not 0 <= index < len(prompts):
-                    raise IndexError(f"backend callback prompt index {index} outside 0..{len(prompts)-1}")
-                with callback_lock:
-                    if index in seen_results:
-                        raise ValueError(f"backend reported prompt {index} more than once")
-                    process(index, result)
-                    seen_results.add(index)
-                    if len(seen_results) % 16 == 0 or len(seen_results) == len(prompts):
-                        print(f"Job {job_id}: generated {len(seen_results)}/{len(prompts)} samples", flush=True)
+                def on_result(index, result):
+                    index = int(index)
+                    if not 0 <= index < len(prompts):
+                        raise IndexError(f"backend callback prompt index {index} outside 0..{len(prompts)-1}")
+                    with callback_lock:
+                        if index in seen_results:
+                            raise ValueError(f"backend reported prompt {index} more than once")
+                        process(index, result)
+                        seen_results.add(index)
+                        progress.advance()
 
-            inference_started = time.perf_counter()
-            infer(prompts, on_result=on_result)
-            inference_seconds += time.perf_counter() - inference_started
-            missing = len(prompts) - len(seen_results)
-            if missing:
-                raise RuntimeError(f"callback backend returned without reporting {missing} of {len(prompts)} prompts")
-        else:
-            bs = config["batch_size"]
-            inference_batches = []
-            for ds_name in dataset_names:
-                indexes = [i for i, (pi, _) in enumerate(prompt_to_problem)
-                           if problems[pi]["dataset_name"] == ds_name]
-                for start in range(0, len(indexes), bs):
-                    inference_batches.append(indexes[start:start + bs])
-            for indexes in tqdm(inference_batches,
-                                desc=f"Job {job_id} batches", position=job_id, leave=True):
                 inference_started = time.perf_counter()
-                batch_outputs = infer([prompts[i] for i in indexes])
+                infer(prompts, on_result=on_result)
                 inference_seconds += time.perf_counter() - inference_started
-                if len(batch_outputs) != len(indexes):
-                    raise ValueError(f"backend returned {len(batch_outputs)} outputs for {len(indexes)} prompts")
-                for prompt_idx, result in zip(indexes, batch_outputs):
-                    process(prompt_idx, result)
+                missing = len(prompts) - len(seen_results)
+                if missing:
+                    raise RuntimeError(f"callback backend returned without reporting {missing} of {len(prompts)} prompts")
+            else:
+                bs = config["batch_size"]
+                inference_batches = []
+                for ds_name in dataset_names:
+                    indexes = [i for i, (pi, _) in enumerate(prompt_to_problem)
+                               if problems[pi]["dataset_name"] == ds_name]
+                    for start in range(0, len(indexes), bs):
+                        inference_batches.append(indexes[start:start + bs])
+                for indexes in inference_batches:
+                    inference_started = time.perf_counter()
+                    batch_outputs = infer([prompts[i] for i in indexes])
+                    inference_seconds += time.perf_counter() - inference_started
+                    if len(batch_outputs) != len(indexes):
+                        raise ValueError(f"backend returned {len(batch_outputs)} outputs for {len(indexes)} prompts")
+                    for prompt_idx, result in zip(indexes, batch_outputs):
+                        process(prompt_idx, result)
+                        progress.advance()
         wait_started = time.perf_counter()
-        drain(as_completed(list(pending)))
+        drain(list(pending))  # insertion (callback) order; result() waits for each
         grading_tail_seconds = time.perf_counter() - wait_started
         metrics = dict(setup_seconds=setup_seconds, inference_call_seconds=inference_seconds,
                        job_wall_seconds=time.perf_counter() - run_started,

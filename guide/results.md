@@ -102,7 +102,9 @@ sum the duplicated copies. Key fields:
 
 - `setup_seconds` (load and capture), `inference_call_seconds`, `job_wall_seconds`.
 - `grading_work_seconds`, `grading_inline_seconds`, `grading_tail_seconds`. Parallel
-  grading overlaps, so their sum is not an elapsed time.
+  grading overlaps, so their sum is not an elapsed time. With grading workers, code
+  extraction (EvalPlus sanitize or the `tah2` block extraction) runs in the workers and is
+  counted in `grading_work_seconds`; without workers it runs inline in the callback.
 - `engine_options`: the effective options, including the resident cap.
 - `memory_budget`: startup KV reservations and graph capture memory.
 - `engine_run`: `generation_seconds`, `callback_seconds`, `generated_tokens`, `swaps`,

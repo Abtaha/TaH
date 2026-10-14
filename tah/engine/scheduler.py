@@ -1,4 +1,5 @@
 """Host request ledger and bounded pinned-host swapping with overflow restart."""
+import time
 from dataclasses import dataclass, field
 import torch
 
@@ -78,12 +79,24 @@ class HostSwap:
             raise ValueError('host swap budget must be nonnegative; chunk_entries positive')
         self.pool, self.budget_bytes = pool, budget_bytes
         self.used_bytes = self.peak_bytes = 0
+        self._last_trim = float("-inf")
         self.chunk_entries = min(chunk_entries, pool.capacity)
         self.scratch = torch.empty(pool.values.shape[0], 2, self.chunk_entries,
                                    *pool.values.shape[3:], dtype=pool.dtype, device=pool.device)
 
     def _host(self, shape, dtype):
         return torch.empty(shape, dtype=dtype, pin_memory=self.pool.device.type == 'cuda')
+
+    def _release_cached(self):
+        # PyTorch's pinned allocator rounds blocks up to powers of two and keeps freed
+        # ones cached per size class without returning them to the OS, so variable-size
+        # snapshots grow host RAM far past the budget. Return cached blocks; blocks with
+        # pending DMA stay until their events complete. No effect on scheduling or numerics.
+        # Throttled: cudaFreeHost/cudaHostAlloc block the host thread, so trimming on every
+        # swap starves the GPU; once a minute bounds growth to one minute of allocations.
+        if self.pool.device.type == 'cuda' and time.monotonic() - self._last_trim >= 60:
+            torch._C._host_emptyCache()
+            self._last_trim = time.monotonic()
 
     def required_bytes(self, state, device_state):
         per_slot = self.pool.values[:, :, :1].numel() * self.pool.values.element_size()
@@ -97,6 +110,7 @@ class HostSwap:
         if self.used_bytes + nbytes > self.budget_bytes:
             raise HostSwapOverflow(f'host swap budget exceeded: need {nbytes} bytes, '
                                    f'{self.budget_bytes - self.used_bytes} available')
+        self._release_cached()
         positions = tuple(tuple(t.host_positions) for t in cache.streams)
         ids = [slot for t in cache.streams for slot in t.host_slots]
         kv = self._host((pool.values.shape[0], 2, len(ids), *pool.values.shape[3:]), pool.dtype)
@@ -149,8 +163,11 @@ class HostSwap:
         # allocator records stream use for copy_; freeing Python refs is safe.
         state.cache, state.snapshot = cache, None
         self.used_bytes -= snapshot.nbytes
+        del snapshot
+        self._release_cached()
 
     def discard(self, state):
         if state.snapshot is not None:
             self.used_bytes -= state.snapshot.nbytes
             state.snapshot = None
+            self._release_cached()

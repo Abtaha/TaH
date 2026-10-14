@@ -19,7 +19,10 @@ Backends:
 """
 from __future__ import annotations
 
+import inspect
 import os
+import sys
+import threading
 import time
 from pathlib import Path
 from dataclasses import fields
@@ -29,6 +32,57 @@ import torch
 
 
 InferenceFn = Callable[..., Optional[List[Tuple]]]
+
+
+class _EngineTokenCounter:
+    """Read CPU request state without hooks, engine locks or tensor access.
+
+    The frozen engine keeps its complete, fixed ``states`` list local to generate.
+    Locate the generating thread's frame once (also through inference_mode's
+    wrapper), retain only the states, and drop all frame references. CPython's GIL
+    makes Python int reads / list lengths safe. Read wasted *before* the length:
+    restart clears generated before adding wasted, so a racing read can only lag,
+    never double-count. A high-water mark hides that short accounting gap.
+    """
+
+    def __init__(self, engine):
+        self.engine = engine
+        self.code = inspect.unwrap(engine.generate).__code__
+        self.thread_id = threading.get_ident()
+        self.started = time.perf_counter()
+        self.states = None
+        self.total = 0
+        self.final = None
+
+    def snapshot(self):
+        if self.final is not None:
+            return self.final
+        states = self.states
+        if states is None:
+            frame = sys._current_frames().get(self.thread_id)
+            try:
+                while frame is not None:
+                    if frame.f_code is self.code and frame.f_locals.get('self') is self.engine:
+                        states = frame.f_locals.get('states')
+                        self.states = states
+                        break
+                    frame = frame.f_back
+            finally:
+                del frame
+        if states is None:
+            return None
+        total = 0
+        for state in states:
+            wasted = state.wasted_tokens
+            total += wasted + len(state.generated)
+        self.total = max(self.total, total)
+        return self.final if self.final is not None else (time.perf_counter() - self.started, self.total)
+
+    def finish(self, total=None):
+        snapshot = self.snapshot()
+        elapsed = time.perf_counter() - self.started
+        self.final = (elapsed, total if total is not None else snapshot[1] if snapshot else 0)
+        self.states = None
 
 
 def time_inference(fn: Callable):
@@ -229,9 +283,11 @@ def setup_tah_engine(config: Dict, model_path: str, tokenizer, tp_size: int = 1)
                               top_k=config.get("top_k", 0), min_p=config.get("min_p", 0.0),
                               do_sample=config["temperature"] > 0)
     warmed = False
+    token_counter = None
 
     def infer(prompts, on_result=None):
-        nonlocal warmed
+        nonlocal warmed, token_counter
+        token_counter = None
         # Exercise the real maximum resident shape outside measured inference.
         ids = [tokenizer.encode(p) for p in prompts]
         if ids and not warmed:
@@ -253,8 +309,15 @@ def setup_tah_engine(config: Dict, model_path: str, tokenizer, tp_size: int = 1)
                     finish_reason=result.finish_reason, timing=result.timing))
             callback_seconds += time.perf_counter() - started
 
-        results = model.generate([Request(p, config["max_new_tokens"], model.seed + i)
-                                  for i, p in enumerate(ids)], sampling, completed)
+        requests = [Request(p, config["max_new_tokens"], model.seed + i)
+                    for i, p in enumerate(ids)]
+        token_counter = _EngineTokenCounter(model)
+        try:
+            results = model.generate(requests, sampling, completed)
+        except BaseException:
+            token_counter.finish()
+            raise
+        token_counter.finish(model.last_run['generated_tokens'] + model.last_run.get('wasted_tokens', 0))
         infer.telemetry = dict(engine_run=model.last_run.copy(), memory_budget=model.memory_budget,
             engine_options=options, callback_seconds=callback_seconds,
             generation_seconds=model.last_run["wall_seconds"] - callback_seconds,
@@ -264,6 +327,7 @@ def setup_tah_engine(config: Dict, model_path: str, tokenizer, tp_size: int = 1)
 
     infer.supports_callback = True
     infer.telemetry = {}
+    infer.progress_snapshot = lambda: token_counter.snapshot() if token_counter is not None else None
     return model, infer
 
 
