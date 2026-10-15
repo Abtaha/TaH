@@ -309,6 +309,18 @@ def parse(argv=None):
     return p.parse_args(argv)
 
 
+def qualified_conclusion(report, complete, statuses):
+    """A metric PASS cannot override missing coverage or arithmetic validity."""
+    req = report["requirements"]
+    validity = report.get("validity", {})
+    valid = bool(validity.get("size_requirement_met") and
+                 (validity.get("status", "").startswith("PASS") or report["oracle"]["dtype"] == "fp64"))
+    covered = req["sequences_at_least_200"] and req["positions_at_least_500k"] and req["free_mode_present"]
+    if not complete:
+        return "incomplete"
+    return "PASS" if covered and valid and all(s == "PASS" for s in statuses) else "not shown"
+
+
 def main(argv=None):
     args = parse(argv)
     manifest = json.loads(args.manifest.read_text())
@@ -353,8 +365,7 @@ def main(argv=None):
                                   positions_at_least_500k=report["positions"] >= 500_000,
                                   free_mode_present="no_large_errors" in report,
                                   oracle_validity=report.get("validity", {}).get("status"))
-    report["conclusion"] = ("PASS" if complete and all(s == "PASS" for s in statuses)
-                            else "incomplete" if not complete else "not shown")
+    report["conclusion"] = qualified_conclusion(report, complete, statuses)
     args.output.mkdir(parents=True, exist_ok=True)
     write_json(args.output / "r1o1.json", report)
     (args.output / "r1o1.md").write_text(markdown(report))

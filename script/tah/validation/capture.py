@@ -34,6 +34,8 @@ def parse(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("impl", choices=["reference", "engine"])
     p.add_argument("--manifest", type=Path, required=True, help="sequence manifest (select_sequences.py)")
+    p.add_argument("--sequence-order", choices=["manifest", "reverse"], default="manifest",
+                   help="validation composition diagnostic: reverse selected sequence order")
     p.add_argument("--subset", default="all", help="'all', a manifest subset name, or first:N")
     p.add_argument("--model", type=Path, required=True)
     p.add_argument("--eval-config", type=Path, default=None, help="TaH config override (real checkpoint)")
@@ -53,7 +55,8 @@ def parse(argv=None):
     p.add_argument("--sampling-topk", type=int, default=128)
     p.add_argument("--memory-fraction", type=float, default=.9)
     p.add_argument("--kv-capacity", type=int, default=None, help="engine KV entries (default: measured once)")
-    p.add_argument("--host-swap-gb", type=float, default=8.)
+    p.add_argument("--host-swap-gb", type=float, default=8.,
+                   help="engine host swap arena, pinned host RAM held while each engine replay runs (one at a time)")
     p.add_argument("--buffer-dir", type=Path, default=Path("data/tmp/oracle-buffer"))
     p.add_argument("--buffer-gb", type=float, default=16., help="logit dump budget per replay")
     p.add_argument("--keep-target", action="store_true",
@@ -194,6 +197,8 @@ def main(argv=None):
         torch.set_num_threads(args.threads)
     manifest = load_manifest(args.manifest)
     seqs = select(manifest, args.subset)
+    if args.sequence_order == "reverse":
+        seqs = list(reversed(seqs))
     args.out.mkdir(parents=True, exist_ok=True)
     compare = args.mode == "forced" and not args.no_compare
     target = Target(args.target, args.device) if args.target else None
@@ -207,6 +212,8 @@ def main(argv=None):
                   oracle_constants="bf16-rounded buffers including inv_freq (R1-O amendment 2026-10-13)",
                   eval_config_sha256=__import__("hashlib").sha256(args.eval_config.read_bytes()).hexdigest()
                   if args.eval_config else None)
+    if args.sequence_order != "manifest":
+        config["sequence_order"] = args.sequence_order
     # --keep-target only changes memory placement, not results; it is not part of the configuration.
     run_path = args.out / "run.json"
     info = json.loads(run_path.read_text()) if run_path.exists() else None

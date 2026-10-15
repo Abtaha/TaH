@@ -383,3 +383,24 @@ def test_prepare_harness_workload_and_fixed_seeds(tmp_path, monkeypatch):
         runner.read_recipe(None, False)
     cfg = runner.read_recipe(runner.RECIPE, False)
     assert cfg["max_new_tokens"] == 4096 and cfg["top_k"] == 20
+
+
+def test_engine_runner_close_releases_host_arena(tmp_path):
+    # The runner's engine patches form reference cycles, so del alone would keep
+    # the (pinned on CUDA) host swap arena until the next gc; close() must not.
+    import gc
+    import weakref
+    from script.tah.validation.engine_run import EngineRunner
+    reference(tmp_path, max_iter=3, label=False)
+    gc.collect()
+    gc.disable()
+    try:
+        for _ in range(3):
+            engine_runner = EngineRunner(tmp_path, device="cpu", kv_capacity=50, max_batch_size=3,
+                                  host_swap_bytes=20000, eos_token_id=None)
+            arena = weakref.ref(engine_runner.engine.host_arena)
+            engine_runner.close()
+            assert arena().closed and arena().buffer is None
+            del engine_runner
+    finally:
+        gc.enable()

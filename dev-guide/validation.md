@@ -218,3 +218,84 @@ prefix; they have no added near-tie cutoff. Length censoring has no observed mar
 - **Paired bias.** Each sequence-bootstrap resample uses the same clusters for
   engine and reference. Compute D = |engine bias| − 1.10·|reference bias| −
   0.1·reference M2; PASS iff its upper 95% percentile ≤ 0 (the protocol amendment).
+
+## Short C1 and the two-stage numerical design
+
+`short_c1.py prepare --model models/TaH-plus-1.7B --output <manifest.json>` freezes
+692 eligible MATH500/GPQA questions and a disjoint 512-question GSM8K increment
+from the seed-42 canonical R2 files. Only identities, questions and answers are
+read; generated answers and correctness do not select cases. Chat-rendered prompts
+longer than 675 tokens are excluded before generation. `--source-root` changes the
+canonical input root; a different existing manifest is never overwritten. Seeds
+are assigned before exclusions and remain fixed across stages. The manifest fixes
+the 512-token cap and both named subsets.
+
+Run each implementation with `coupled_run run ... --manifest <manifest.json>
+--subset stage1 --max-new-tokens 512` (or `stage2`); oracle rows use
+`--oracle-batch 4`, with an OOM retry in a fresh batch-2 directory. Reference stays
+b8. These stage subsets are supported only for this protocol. Existing full R1-O2
+commands keep their previous coverage/cap checks. Reference/oracle telemetry now
+also includes allocated/reserved GPU high-water marks. CPU short-protocol fixtures
+are explicitly labelled and cannot establish a confirmatory PASS.
+
+`short_c1 analyze --manifest <manifest.json> --root <run-root> --look 1|2
+--validity-report <r1o1.json>` expects `stageN/{engine,reference}/` and an
+`stageN/oracle.path` file identifying that stage's successful oracle directory.
+It checks complete stage coverage, provenance, production settings and oracle
+validity. JSON `lookN.json` includes the paired lower 97.5% bound, administrative
+censoring at 512, identical trajectories/EOS censoring, and the next action.
+The lower bound is capped at the observed difference; a stage stops for hard
+futility if even all remaining prefixes at engine512/reference0 cannot make
+the final point margin nonnegative. C2
+is withdrawn in this design: no accuracy comparison is made. Stage 2 is exactly
+512 new questions and is refused after stage-1 success; saved stage-1 samples and
+batch composition are never altered.
+
+`near_tie.py --oracle <dir> --engine <free-dir> --reference <free-dir> --output
+<json>` reports both the original maximum-margin rule and an added tail statistic:
+the mean of the per-sequence 90th-percentile oracle margins at disagreements
+(zero for a sequence with none). Decision and top-1 margins are separate tests.
+A studentized paired sequence bootstrap (10,000 resamples, seed 20261013), with a
+Student-t critical-value floor, bounds engine minus 1.10 times reference above
+at the requested confidence (`--alpha .05` by default for diagnostics, `.025` for
+each confirmatory look, giving a 97.5% bound and a t floor with n−1 degrees of freedom).
+JSON includes `alpha`, `confidence`, `upper_bound` and `upper95` or `upper975`. Both bounds must be <=0; fewer than 20 disagreement events on either side
+are inconclusive. Correlations of sequence maxima, shared-position Jaccard overlap and binary
+position phi on jointly eligible positions are descriptive, without an invented correlation threshold. The original maximum
+rule is computed in full and reported, without affecting the conclusion or futility.
+The calibrated tail criterion is binding; both its addition and the demotion of the
+maximum rule were decided after diagnostic pilots and before confirmatory data.
+
+For a free CPU diagnostic, replace `--reference` with `--self-splits 1000`
+(`--bootstrap-per-split 1000`): random halves use independent cluster resampling.
+The output separates maximum-rule failure, failure to prove non-inferiority,
+exact permutation false equality alarms, and false non-inferiority assertions at
+the artificial 10% boundary. Only the false-alarm rates are nominally 5%; the
+success rate at equal accuracy is power, not a guaranteed 95%.
+
+`capture --sequence-order reverse` reverses the selected sequences and records the
+order in provenance; use fresh outputs to compare a different engine batch
+composition. It does not change teacher-forced inputs. `paired_look --root <root>
+--manifest <manifest> --look 1|2` pools the immutable O1 stage shards, applies the
+approved 97.5% bounds, checks exact 64/200 coverage and arithmetic validity, and
+retains each criterion's early success permanently. Both forced and free modes start
+on 64 sequences; unresolved forced criteria and tail criteria independently trigger
+the same frozen +136 IDs, pooled to 200. Each look spends one-sided alpha .025.
+`o1/lookN.json` includes `criteria` (forced bounds), `tail` (studentized tail bounds),
+`forced_next_action` and `free_next_action`: `stop_for_success`, `continue_fixed_136`,
+`stop_at_maximum_not_shown` or `stop_for_futility` (invalid oracle arithmetic).
+`original_maximum` records its nonbinding status and both maximum-rule verdicts.
+A stopped arm needs no stage-2 records; the other arm can continue alone. Shared
+oracle records for the 136 IDs are computed once when either increment is needed.
+Validity failure stops both arms and C1 before any further GPU work; maximum-rule
+failure never triggers futility. The composition demonstration stays a single
+descriptive comparison at its original diagnostic confidence.
+The legacy `analyze` conclusion now requires its original 200/500k size and valid
+oracle, so its diagnostic 64-sequence output cannot be mistaken for a protocol
+PASS; the approved two-stage result lives in `paired_look`'s `o1/lookN.json`.
+
+Validation: `tests/test_short_design.py` covers prompt exclusions/stable seeds,
+fixed cap/subset execution, append/resume and fixture guards, quantiles, studentized
+paired tails and alpha spending, independent forced/free shell branches, permanent
+per-criterion stopping, report-only maxima, self-comparison diagnostic distinctions and mandatory size/validity
+qualification. Run the complete CPU validation and engine suites after runner changes.

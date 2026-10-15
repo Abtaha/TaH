@@ -3,6 +3,10 @@
 prepare freezes harness prompts, grading answers and request seeds; run executes
 one implementation. No global seed can substitute for the per-request uniforms.
 Completed blocks are resumable; interrupted blocks are replayed in their entirety.
+
+Host RAM: ``run engine`` builds one engine with the evaluation's default
+``host_swap_bytes`` (8 GiB), pinned in full at startup, so its process needs the
+engine baseline RSS + 8 GiB. ``run reference``/``run oracle`` pin no swap arena.
 """
 from __future__ import annotations
 
@@ -65,6 +69,10 @@ def prepare(model, output):
 
 
 def validate_manifest(manifest):
+    if manifest.get("protocol") == "R1-O2-C1-short":
+        from .short_c1 import validate
+        validate(manifest)
+        return
     problems = manifest["problems"]
     ids = [p["id"] for p in problems]
     if not problems or len(set(ids)) != len(ids) or any(not p["prompt"] for p in problems):
@@ -186,12 +194,15 @@ def read_recipe(path, fixture):
 def run(args):
     manifest = json.loads(args.manifest.read_text())
     validate_manifest(manifest)
-    fixture = manifest.get("protocol") == "fixture"
+    short = manifest.get("protocol") == "R1-O2-C1-short"
+    fixture = manifest.get("protocol") == "fixture" or (short and manifest.get("fixture", False))
     if args.device == "cpu":
         cfg = json.loads((args.model / "config.json").read_text())
         if not fixture or cfg["hidden_size"] > 128 or cfg["vocab_size"] > 1024:
             raise ValueError("CPU execution is restricted to tiny fixture models")
-    if args.max_new_tokens != MAX_TOKENS and not (args.pilot or fixture):
+    if short and (args.max_new_tokens != 512 or args.pilot):
+        raise ValueError("short C1 requires cap512 and no pilot override")
+    if args.max_new_tokens != MAX_TOKENS and not (args.pilot or fixture or short):
         raise ValueError("a token-cap override is allowed only for pilots/fixtures")
     if args.block < 32 and args.implementation == "engine" and not (args.pilot or fixture):
         raise ValueError("engine blocks must have at least 32 requests")
@@ -201,6 +212,14 @@ def run(args):
         problems = [p for p in problems if p["id"] in manifest["oracle_ids"]]
     if args.pilot:
         problems = [p for p in problems if p["index"] < args.pilot]
+    subset = getattr(args, "subset", "all")
+    if short:
+        if subset not in manifest["subsets"]:
+            raise ValueError("short C1 requires an explicit frozen stage subset")
+        wanted = set(manifest["subsets"][subset])
+        problems = [p for p in problems if p["id"] in wanted]
+    elif subset != "all":
+        raise ValueError("subset applies only to the short C1 protocol")
     batch_size = args.oracle_batch if args.implementation == "oracle" else 8
     block_size = args.block if args.implementation == "engine" else batch_size
     config = dict(version=1, implementation=args.implementation, manifest_sha256=digest(manifest),
@@ -217,6 +236,8 @@ def run(args):
                   problems=[p["id"] for p in problems], oracle_ids=manifest["oracle_ids"],
                   engine_options=dict(cuda_graphs=True, overlap=True, compile=False,
                                       max_batch_size=min(64, args.block)))
+    if short:
+        config["subset"] = subset
     from .capture import environment
     config["environment"] = environment()
     out = args.out
@@ -308,7 +329,11 @@ def run(args):
                     np.savez_compressed(tmp, details=np.asarray(trace, dtype=np.float64).reshape(-1, 7))
                     os.replace(tmp, target)
                 persist(r)
-            info["telemetry"][str(b)] = dict(wall_seconds=time.monotonic() - started)
+            info["telemetry"][str(b)] = dict(wall_seconds=time.monotonic() - started,
+                peak_gpu_allocated_bytes=torch.cuda.max_memory_allocated(model.device)
+                if model.device.type == "cuda" else 0,
+                peak_gpu_reserved_bytes=torch.cuda.max_memory_reserved(model.device)
+                if model.device.type == "cuda" else 0)
         info["completed_blocks"].append(b)
         info["status"] = "complete" if len(info["completed_blocks"]) == len(blocks) else "running"
         write_json(path, info)
@@ -328,6 +353,7 @@ def parse(argv=None):
     gen.add_argument("--eval-config", type=Path, help=f"required for protocol runs: {RECIPE}")
     gen.add_argument("--out", type=Path, required=True)
     gen.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
+    gen.add_argument("--subset", default="all", help="short C1 only: frozen stage1 or stage2 subset")
     gen.add_argument("--pilot", type=int, default=0, help="first N per dataset, diagnostic only")
     gen.add_argument("--max-new-tokens", type=int, default=MAX_TOKENS, help="override for pilot/fixture only")
     gen.add_argument("--block", type=int, default=128, help="engine requests per resumable block")

@@ -10,6 +10,12 @@ pool is full). Patches live on the engine instance only:
   * the engine's observer hook records every pass and final logits.
 CUDA graphs are off (graph replay is bitwise identical to this eager step per the
 engine identity tests) and overlap is off (its identity gate covers it).
+
+Host RAM: each runner's engine pins ``host_swap_bytes`` (default 8 GiB) at
+construction, so a process needs the engine baseline RSS + that budget per live
+runner. The engine patches below form reference cycles, so ``del`` alone frees the
+arena only at the next garbage collection: call ``close()`` before building the next
+runner (``capture.py`` does).
 """
 from __future__ import annotations
 
@@ -194,4 +200,5 @@ class EngineRunner:
         return self._recorders, stats
 
     def close(self):
+        self.engine.close()  # unpin the host swap arena now, not at the next gc
         del self.engine
