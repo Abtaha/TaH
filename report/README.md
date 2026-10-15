@@ -7,12 +7,15 @@ analysis. Chapters curate the results used in the research report; the
 | Chapter | Contents | Status |
 | --- | --- | --- |
 | [Engine](1-engine/README.md) | Design, reference self-noise, mechanism checks, performance, robustness, confirmatory accuracy (R1) and negative results | Curated summary; R1 accuracy test complete (equivalence not shown, underpowered); R1-O oracle comparison pending |
+| [Baseline](2-baseline/README.md) | Reproduction of the published TaH+ 1.7B results on nine benchmarks (R2, three seeds), code-prompt analysis, run telemetry at 8192 tokens | Curated summary; R2 complete (8 of 9 benchmarks and the average reproduced with the TaH2 code prompt; GPQA-Diamond below the paper) |
 
-Regenerate the engine chapter on CPU:
+Regenerate the chapters on CPU:
 
 ```bash
 python report/1-engine/analyze.py
+python report/2-baseline/analyze.py
 ```
 
 GPU reproduction commands and runtime estimates are listed by
-`bash report/1-engine/reproduce.sh`; printing the plan runs no experiments.
+`bash report/1-engine/reproduce.sh` and `bash report/2-baseline/reproduce.sh`;
+printing the plan runs no experiments.
