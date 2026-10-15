@@ -28,43 +28,39 @@
   "reproduction": {
     "accuracy": {
       "device": "GPU; resumable groups",
-      "runtime": "12\u201317 h"
+      "runtime": "12–17 h"
     },
     "diagnostics": {
       "device": "GPU",
-      "runtime": "11\u201315 min"
+      "runtime": "11–15 min"
     },
     "equivalence": {
       "device": "GPU",
-      "runtime": "2\u20134 h"
+      "runtime": "2–4 h"
     },
     "exact": {
       "device": "CPU",
       "runtime": "under 1 min"
     },
-    "exploratory": {
-      "device": "CPU",
-      "runtime": "seconds"
-    },
     "fixtures": {
       "device": "GPU + CPU preparation",
-      "runtime": "30\u201345 min"
+      "runtime": "30–45 min"
     },
     "negative": {
       "device": "GPU",
-      "runtime": "20\u201335 min"
+      "runtime": "20–35 min"
     },
     "reference": {
       "device": "GPU",
-      "runtime": "72\u201385 min"
+      "runtime": "72–85 min"
     },
     "robustness": {
       "device": "GPU",
-      "runtime": "25\u201330 min"
+      "runtime": "25–30 min"
     },
     "speed": {
       "device": "GPU",
-      "runtime": "18\u201325 min"
+      "runtime": "18–25 min"
     }
   }
 }

@@ -1205,198 +1205,6 @@
         "greedy"
       ]
     },
-    "evaluations/engine-seed1234/gpqa/detailed_results.csv": {
-      "bytes": 34086,
-      "encoding": "original bytes",
-      "purpose": "Evaluation: sample grades/counts, raw generations, configuration, completion or job telemetry. Shared job metrics must be counted once.",
-      "sha256": "fd87bb743eab14df443f88abf4524d11b6f3b18e036fdc6415706e1cb39480be",
-      "source_bytes": 34086,
-      "source_mtime_utc": "2026-10-13T08:30:08.167281+00:00",
-      "source_path": "data/engine/wp9b/wacc-seed1234-combined/gpqa/detailed_results.csv",
-      "source_sha256": "fd87bb743eab14df443f88abf4524d11b6f3b18e036fdc6415706e1cb39480be",
-      "top_level_keys_or_columns": [
-        "problem_id",
-        "sample_idx",
-        "correct_answer",
-        "predicted_answer",
-        "has_answer",
-        "is_correct",
-        "input_tokens",
-        "output_tokens",
-        "processing_time",
-        "mean_passes_per_token",
-        "fraction_tokens_at_least_2_passes",
-        "pass_stat_tokens"
-      ]
-    },
-    "evaluations/engine-seed1234/math500/detailed_results.csv": {
-      "bytes": 40876,
-      "encoding": "original bytes",
-      "purpose": "Evaluation: sample grades/counts, raw generations, configuration, completion or job telemetry. Shared job metrics must be counted once.",
-      "sha256": "09961ee41d907ba295a271af42b00857a05b22138513cac067faa649d0d34574",
-      "source_bytes": 40876,
-      "source_mtime_utc": "2026-10-13T08:30:07.632740+00:00",
-      "source_path": "data/engine/wp9b/wacc-seed1234-combined/math500/detailed_results.csv",
-      "source_sha256": "09961ee41d907ba295a271af42b00857a05b22138513cac067faa649d0d34574",
-      "top_level_keys_or_columns": [
-        "problem_id",
-        "sample_idx",
-        "correct_answer",
-        "predicted_answer",
-        "has_answer",
-        "is_correct",
-        "input_tokens",
-        "output_tokens",
-        "processing_time",
-        "mean_passes_per_token",
-        "fraction_tokens_at_least_2_passes",
-        "pass_stat_tokens"
-      ]
-    },
-    "evaluations/engine-seed2024/gpqa/detailed_results.csv": {
-      "bytes": 34210,
-      "encoding": "original bytes",
-      "purpose": "Evaluation: sample grades/counts, raw generations, configuration, completion or job telemetry. Shared job metrics must be counted once.",
-      "sha256": "c3ec3e588ca1b0b6be93e4813126ca7c0d6f7105b2a799d2707a2d28252bbe9f",
-      "source_bytes": 34210,
-      "source_mtime_utc": "2026-10-13T12:06:41.043700+00:00",
-      "source_path": "data/engine/wp10/wacc-seed2024-combined/gpqa/detailed_results.csv",
-      "source_sha256": "c3ec3e588ca1b0b6be93e4813126ca7c0d6f7105b2a799d2707a2d28252bbe9f",
-      "top_level_keys_or_columns": [
-        "problem_id",
-        "sample_idx",
-        "correct_answer",
-        "predicted_answer",
-        "has_answer",
-        "is_correct",
-        "input_tokens",
-        "output_tokens",
-        "processing_time",
-        "mean_passes_per_token",
-        "fraction_tokens_at_least_2_passes",
-        "pass_stat_tokens"
-      ]
-    },
-    "evaluations/engine-seed2024/math500/detailed_results.csv": {
-      "bytes": 39133,
-      "encoding": "original bytes",
-      "purpose": "Evaluation: sample grades/counts, raw generations, configuration, completion or job telemetry. Shared job metrics must be counted once.",
-      "sha256": "6b0c7d596dfad16a972bd2257773e0b6ddaea9fece22885681b31b2e3740e561",
-      "source_bytes": 39133,
-      "source_mtime_utc": "2026-10-13T12:06:40.567501+00:00",
-      "source_path": "data/engine/wp10/wacc-seed2024-combined/math500/detailed_results.csv",
-      "source_sha256": "6b0c7d596dfad16a972bd2257773e0b6ddaea9fece22885681b31b2e3740e561",
-      "top_level_keys_or_columns": [
-        "problem_id",
-        "sample_idx",
-        "correct_answer",
-        "predicted_answer",
-        "has_answer",
-        "is_correct",
-        "input_tokens",
-        "output_tokens",
-        "processing_time",
-        "mean_passes_per_token",
-        "fraction_tokens_at_least_2_passes",
-        "pass_stat_tokens"
-      ]
-    },
-    "evaluations/engine-seed42/gpqa/detailed_results.csv": {
-      "bytes": 34200,
-      "encoding": "original bytes",
-      "purpose": "Evaluation: sample grades/counts, raw generations, configuration, completion or job telemetry. Shared job metrics must be counted once.",
-      "sha256": "30cb66041766a5a1529077e5da7f46b8f8a817c3c4fb73c552e4153272fd327a",
-      "source_bytes": 34200,
-      "source_mtime_utc": "2026-10-13T06:42:03.113048+00:00",
-      "source_path": "data/engine/wp9/wacc/gpqa_tah_engine/20261013_080622/detailed_results.csv",
-      "source_sha256": "30cb66041766a5a1529077e5da7f46b8f8a817c3c4fb73c552e4153272fd327a",
-      "top_level_keys_or_columns": [
-        "problem_id",
-        "sample_idx",
-        "correct_answer",
-        "predicted_answer",
-        "has_answer",
-        "is_correct",
-        "input_tokens",
-        "output_tokens",
-        "processing_time",
-        "mean_passes_per_token",
-        "fraction_tokens_at_least_2_passes",
-        "pass_stat_tokens"
-      ]
-    },
-    "evaluations/engine-seed42/math500/detailed_results.csv": {
-      "bytes": 41212,
-      "encoding": "original bytes",
-      "purpose": "Evaluation: sample grades/counts, raw generations, configuration, completion or job telemetry. Shared job metrics must be counted once.",
-      "sha256": "7de7d92dff7349b7394879f68fb765626081d8fded2129b8911a5d43d47191ee",
-      "source_bytes": 41212,
-      "source_mtime_utc": "2026-10-13T06:42:02.747745+00:00",
-      "source_path": "data/engine/wp9/wacc/math500_tah_engine/20261013_080622/TASK_0_200/detailed_results.csv",
-      "source_sha256": "7de7d92dff7349b7394879f68fb765626081d8fded2129b8911a5d43d47191ee",
-      "top_level_keys_or_columns": [
-        "problem_id",
-        "sample_idx",
-        "correct_answer",
-        "predicted_answer",
-        "has_answer",
-        "is_correct",
-        "input_tokens",
-        "output_tokens",
-        "processing_time",
-        "mean_passes_per_token",
-        "fraction_tokens_at_least_2_passes",
-        "pass_stat_tokens"
-      ]
-    },
-    "evaluations/reference-exploratory/gpqa/detailed_results.csv": {
-      "bytes": 32370,
-      "encoding": "original bytes",
-      "purpose": "Evaluation: sample grades/counts, raw generations, configuration, completion or job telemetry. Shared job metrics must be counted once.",
-      "sha256": "40cb0daa8726faa07b2b45d937338892df2c558e1991a7ce2cbabb584764e073",
-      "source_bytes": 32370,
-      "source_mtime_utc": "2026-10-12T11:49:05.960825+00:00",
-      "source_path": "data/engine/wacc_reference_recovery/pending/combined/gpqa_tah/20261011_182527/job_0/detailed_results.csv",
-      "source_sha256": "40cb0daa8726faa07b2b45d937338892df2c558e1991a7ce2cbabb584764e073",
-      "top_level_keys_or_columns": [
-        "problem_id",
-        "sample_idx",
-        "correct_answer",
-        "predicted_answer",
-        "has_answer",
-        "is_correct",
-        "input_tokens",
-        "output_tokens",
-        "processing_time",
-        "mean_passes_per_token",
-        "fraction_tokens_at_least_2_passes",
-        "pass_stat_tokens"
-      ]
-    },
-    "evaluations/reference-exploratory/math500/detailed_results.csv": {
-      "bytes": 37415,
-      "encoding": "original bytes",
-      "purpose": "Evaluation: sample grades/counts, raw generations, configuration, completion or job telemetry. Shared job metrics must be counted once.",
-      "sha256": "2429f7dd8d3ebd029fe9badfb9ddbadb03a491d5a61552252ccf274c35586957",
-      "source_bytes": 37415,
-      "source_mtime_utc": "2026-10-12T11:49:05.844581+00:00",
-      "source_path": "data/engine/wacc_reference_recovery/pending/combined/math500_tah/20261011_182527/TASK_0_200/job_0/detailed_results.csv",
-      "source_sha256": "2429f7dd8d3ebd029fe9badfb9ddbadb03a491d5a61552252ccf274c35586957",
-      "top_level_keys_or_columns": [
-        "problem_id",
-        "sample_idx",
-        "correct_answer",
-        "predicted_answer",
-        "has_answer",
-        "is_correct",
-        "input_tokens",
-        "output_tokens",
-        "processing_time",
-        "mean_passes_per_token",
-        "fraction_tokens_at_least_2_passes",
-        "pass_stat_tokens"
-      ]
-    },
     "exact.json": {
       "bytes": 2929,
       "encoding": "curated JSON",
@@ -1411,49 +1219,49 @@
         },
         {
           "source_bytes": 1981,
-          "source_mtime_utc": "2026-10-13T15:08:04.885808+00:00",
+          "source_mtime_utc": "2026-10-14T04:46:57.120353+00:00",
           "source_path": "data/engine/wp3/cpu-pytest/mlp3.json",
           "source_sha256": "55d08c4b42dd958695bba2acff310325ed9431ed53fc6545486d35b7099191e2"
         },
         {
           "source_bytes": 1481,
-          "source_mtime_utc": "2026-10-13T15:08:05.512282+00:00",
+          "source_mtime_utc": "2026-10-14T04:46:57.642603+00:00",
           "source_path": "data/engine/wp3/cpu-pytest/mlp1.json",
           "source_sha256": "6e562522947c2d0e49a580adea6a7c2b880c59fbe6a91e87f0ab585205cf333b"
         },
         {
           "source_bytes": 1981,
-          "source_mtime_utc": "2026-10-13T15:08:06.642416+00:00",
+          "source_mtime_utc": "2026-10-14T04:46:58.766910+00:00",
           "source_path": "data/engine/wp3/cpu-pytest/label3.json",
           "source_sha256": "d62aee57175f20955203f44b49d89af939d5560b7d3ee343e3f897a78bc3c5dc"
         },
         {
           "source_bytes": 1972,
-          "source_mtime_utc": "2026-10-13T15:08:27.261705+00:00",
+          "source_mtime_utc": "2026-10-14T04:47:21.380387+00:00",
           "source_path": "data/engine/wp3/cpu-pytest/long-label3.json",
           "source_sha256": "a07b4c67c38e1ac241ad1a62b05b66fa3c4406edcc5dbad44d72b3b7c995ce3d"
         },
         {
           "source_bytes": 1630,
-          "source_mtime_utc": "2026-10-13T15:08:22.743409+00:00",
+          "source_mtime_utc": "2026-10-14T04:47:18.517491+00:00",
           "source_path": "data/engine/wp3/cpu-pytest/production-real.json",
           "source_sha256": "054fa42dc727b51079b6eb11cc0fa65d9374bea41fb6397dc1a918fa595356cb"
         },
         {
           "source_bytes": 1948,
-          "source_mtime_utc": "2026-10-13T15:08:24.186934+00:00",
+          "source_mtime_utc": "2026-10-14T04:47:19.187697+00:00",
           "source_path": "data/engine/wp3/cpu-pytest/production-mlp3.json",
           "source_sha256": "59cbe21a686b9638b5385159e84de6641217cefd6b4098bd1f4a1f64185dc557"
         },
         {
           "source_bytes": 1312,
-          "source_mtime_utc": "2026-10-13T15:08:25.313468+00:00",
+          "source_mtime_utc": "2026-10-14T04:47:19.843297+00:00",
           "source_path": "data/engine/wp3/cpu-pytest/production-mlp1.json",
           "source_sha256": "7175fd41e6f0b070d09381b08efe872ed3a8e3ddebde0d76d300090edeb8f0dc"
         },
         {
           "source_bytes": 1949,
-          "source_mtime_utc": "2026-10-13T15:08:26.784537+00:00",
+          "source_mtime_utc": "2026-10-14T04:47:20.914235+00:00",
           "source_path": "data/engine/wp3/cpu-pytest/production-label3.json",
           "source_sha256": "79b52273ed5c5a337744633c08befbae37bac0a29771368520b7a4777a35c393"
         },
@@ -1492,10 +1300,10 @@
       ]
     },
     "method.json": {
-      "bytes": 1702,
+      "bytes": 1600,
       "encoding": "declared policy",
       "purpose": "Analysis policy and estimated reproduction runtimes; not measurements.",
-      "sha256": "f128a2189c8a118b5c934505a6418174d59a7b3b322ebbad4ab0e48d4ba408a6",
+      "sha256": "3c2b5916d4c463cf8af9dd8c360fd641eeb6d383ee9af78a9cfe2a98f2ed0644",
       "source_bytes": 790,
       "source_mtime_utc": "2026-10-13T10:46:31.499002+00:00",
       "source_path": "report/1-engine/data/method.json",
@@ -1585,6 +1393,621 @@
         "report"
       ]
     },
+    "r1/runs.json": {
+      "bytes": 120706,
+      "encoding": "curated JSON",
+      "purpose": "Confirmatory R1 status, groups, settings, telemetry and source provenance.",
+      "sha256": "61e54d7ab7939aacc183c7b7b74acf271a0a2ea64071c85730f75ac4e756aa00",
+      "sources": [
+        {
+          "source_bytes": 34104,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/canonical/gpqa_tah_engine/20261013T143648+0000/detailed_results.csv",
+          "source_sha256": "c6b8335198fc5c0722aba1555a239f5dea175c3eb0a317a8d174d41ae6221676"
+        },
+        {
+          "source_bytes": 268,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/canonical/gpqa_tah_engine/20261013T143648+0000/effective_config.yaml",
+          "source_sha256": "f5d05a80caa5ebbad50002702fde836b6f1d486f7358f55da8e32cc9679edb1e"
+        },
+        {
+          "source_bytes": 1335,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/canonical/gpqa_tah_engine/20261013T143648+0000/run_status.json",
+          "source_sha256": "f36e430d504a5304c892ff24a01bb2a7a9f8d9afaeb0fefc5bb7446cd309f828"
+        },
+        {
+          "source_bytes": 39295,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/canonical/math500_tah_engine/20261013T143648+0000/TASK_0_200/detailed_results.csv",
+          "source_sha256": "6cfad1ce6335fb840ce8978dd982ece0d57b0fe6282cbf7126c7c27ea22d5b09"
+        },
+        {
+          "source_bytes": 173,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/canonical/math500_tah_engine/20261013T143648+0000/TASK_0_200/effective_config.yaml",
+          "source_sha256": "157168d565d25bbf1063e1ed12f4c40850d2ef5ac987e55c8049afda80e3af7a"
+        },
+        {
+          "source_bytes": 1338,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/canonical/math500_tah_engine/20261013T143648+0000/TASK_0_200/run_status.json",
+          "source_sha256": "c01895305406622ce13e1093d058de4aca0701f17412c73fa09be76b26c22768"
+        },
+        {
+          "source_bytes": 8220,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/canonical/protocol_manifest.json",
+          "source_sha256": "2ba9a71d77a11d8f39f7e47c0e994acf93c8fd315b12dc6f465d1187ab7e00d9"
+        },
+        {
+          "source_bytes": 2008,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_long/runs/0001-initial/command.json",
+          "source_sha256": "50cbe887bf079e2f28ac5a59fa8f39d29673ebb0009627ed8722eb29b170365c"
+        },
+        {
+          "source_bytes": 561,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_long/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_171232/effective_config.yaml",
+          "source_sha256": "a1238e5038adb925ec2761e25bbba344d630a4ba906b9b66f028d8bc9136a8e3"
+        },
+        {
+          "source_bytes": 3044,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_long/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_171232/job_0.metrics.json",
+          "source_sha256": "4c7b237dc6d26f2f2ff0f01e1ab5db0e4a2a0253b56373ab522390b3c6733558"
+        },
+        {
+          "source_bytes": 342,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_long/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_171232/run_status.json",
+          "source_sha256": "483cfde9d1c851ff53767d544cb090ade60d3d070cfdf114d7dbf752bf317579"
+        },
+        {
+          "source_bytes": 2052,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_short_129_165/runs/0001-initial/command.json",
+          "source_sha256": "2fb33281d9f217c0b8c0348c01789b2280c69ea1277a4eca245a36ff9b96667a"
+        },
+        {
+          "source_bytes": 561,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_short_129_165/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_170318/TASK_128_165/effective_config.yaml",
+          "source_sha256": "8edfa02fb124d931400205cdcd7a08dcad0fa9710e54e92a889aac00fe680a68"
+        },
+        {
+          "source_bytes": 4491,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_short_129_165/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_170318/TASK_128_165/job_0.metrics.json",
+          "source_sha256": "e07268b2ad1bc84ca087f4f5ccbb243c36ef400044ce65b3f2a3320993abe9cc"
+        },
+        {
+          "source_bytes": 344,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_short_129_165/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_170318/TASK_128_165/run_status.json",
+          "source_sha256": "2392b87f1a267d38871459153d220b959fd3fbb6785eaeb187f23d47456b83b3"
+        },
+        {
+          "source_bytes": 2052,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_short_167_198/runs/0001-initial/command.json",
+          "source_sha256": "ce522872a15caa928ff6e9a913e7e735c9d5b9a779179bab84afdeeb0c22b97f"
+        },
+        {
+          "source_bytes": 561,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_short_167_198/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_170824/TASK_166_198/effective_config.yaml",
+          "source_sha256": "8edfa02fb124d931400205cdcd7a08dcad0fa9710e54e92a889aac00fe680a68"
+        },
+        {
+          "source_bytes": 4443,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_short_167_198/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_170824/TASK_166_198/job_0.metrics.json",
+          "source_sha256": "fb975c3a32f2647c421f8cf850966ce95587b157076247cfe3ba49900cfe3633"
+        },
+        {
+          "source_bytes": 344,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_short_167_198/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_170824/TASK_166_198/run_status.json",
+          "source_sha256": "af920987c93a197c88074403d30f534856f6f12bf45c2bb5b4c85764b61e346c"
+        },
+        {
+          "source_bytes": 2028,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_short_1_81/runs/0001-initial/command.json",
+          "source_sha256": "3f1588d674bf654d9b3de7ad474aaa3e464902949b658f8f3a7aef21cc96bb12"
+        },
+        {
+          "source_bytes": 561,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_short_1_81/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_164736/TASK_0_81/effective_config.yaml",
+          "source_sha256": "8edfa02fb124d931400205cdcd7a08dcad0fa9710e54e92a889aac00fe680a68"
+        },
+        {
+          "source_bytes": 4452,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_short_1_81/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_164736/TASK_0_81/job_0.metrics.json",
+          "source_sha256": "6e1adf8cbd7d8de1160e25b2b17d7d8573d6af974f7231b98b24c8570c917a25"
+        },
+        {
+          "source_bytes": 346,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_short_1_81/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_164736/TASK_0_81/run_status.json",
+          "source_sha256": "5a3ea47137cffed1960bc24007870b3b875d9d7a427d5b886e274402ca1e91c6"
+        },
+        {
+          "source_bytes": 2036,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_short_83_92/runs/0001-initial/command.json",
+          "source_sha256": "e72475aebe601818d75b88d3026c68c11bd0434bce81d3da6449675176aa9310"
+        },
+        {
+          "source_bytes": 561,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_short_83_92/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_165627/TASK_82_92/effective_config.yaml",
+          "source_sha256": "8edfa02fb124d931400205cdcd7a08dcad0fa9710e54e92a889aac00fe680a68"
+        },
+        {
+          "source_bytes": 3337,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_short_83_92/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_165627/TASK_82_92/job_0.metrics.json",
+          "source_sha256": "e6d1eb8bc64956f4d18101be2d59b78b831777e6d5c8b491d46404c0aad7e446"
+        },
+        {
+          "source_bytes": 344,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_short_83_92/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_165627/TASK_82_92/run_status.json",
+          "source_sha256": "c1a77d63e633e51ac336010578de1771cbd1e84ba2881aea26aea31fe0319a67"
+        },
+        {
+          "source_bytes": 2044,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_short_94_127/runs/0001-initial/command.json",
+          "source_sha256": "59478a2c129fad4cd7e292545927af216f142ac2fd27e60ba2d0ba7379b24802"
+        },
+        {
+          "source_bytes": 561,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_short_94_127/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_165823/TASK_93_127/effective_config.yaml",
+          "source_sha256": "8edfa02fb124d931400205cdcd7a08dcad0fa9710e54e92a889aac00fe680a68"
+        },
+        {
+          "source_bytes": 4491,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_short_94_127/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_165823/TASK_93_127/job_0.metrics.json",
+          "source_sha256": "108c45b580cef66f29fd0431daa2b662255a2326b6245276c29d15884e04f9fc"
+        },
+        {
+          "source_bytes": 344,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/gpqa_short_94_127/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_165823/TASK_93_127/run_status.json",
+          "source_sha256": "fe59f7394ce21c3173b61ac44e7517baf70f22d95da229c64b663872aab68db1"
+        },
+        {
+          "source_bytes": 2039,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/math500_0_200/runs/0001-initial/command.json",
+          "source_sha256": "942dc3532b801b6704ba4176a988978058f625ef55974a792f68a93c09690791"
+        },
+        {
+          "source_bytes": 561,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/math500_0_200/runs/0001-initial/eval_output/math500_tah_engine/20261013_163650/TASK_0_200/effective_config.yaml",
+          "source_sha256": "8edfa02fb124d931400205cdcd7a08dcad0fa9710e54e92a889aac00fe680a68"
+        },
+        {
+          "source_bytes": 4452,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/math500_0_200/runs/0001-initial/eval_output/math500_tah_engine/20261013_163650/TASK_0_200/job_0.metrics.json",
+          "source_sha256": "bb118f98a3b655e2fe411951e3e1fe51016cf445e4700b95e8a04073eaa67486"
+        },
+        {
+          "source_bytes": 349,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/groups/math500_0_200/runs/0001-initial/eval_output/math500_tah_engine/20261013_163650/TASK_0_200/run_status.json",
+          "source_sha256": "84c40a5ad36d4465efb9e8a493e1933cf40a57bf150d9c81a8c52ef6d64fd95d"
+        },
+        {
+          "source_bytes": 34219,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/canonical/gpqa_tah_engine/20261013T135820+0000/detailed_results.csv",
+          "source_sha256": "de7cc65391421de98bfc04c0e60550b513e07f511f5145749ba0480986786017"
+        },
+        {
+          "source_bytes": 266,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/canonical/gpqa_tah_engine/20261013T135820+0000/effective_config.yaml",
+          "source_sha256": "d8fef5e441b199a255b9f22488a8df0992958603ed46a2214846fdf2884aff27"
+        },
+        {
+          "source_bytes": 1333,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/canonical/gpqa_tah_engine/20261013T135820+0000/run_status.json",
+          "source_sha256": "965929a18ab4e78d30f9d0eb21b07adcd915251b99e0f1bbc564d7bf45f8477b"
+        },
+        {
+          "source_bytes": 39099,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/canonical/math500_tah_engine/20261013T135820+0000/TASK_0_200/detailed_results.csv",
+          "source_sha256": "2e7de75ff925d523bae733c543172618d5f945f9c44339f842fd1e81b486f290"
+        },
+        {
+          "source_bytes": 171,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/canonical/math500_tah_engine/20261013T135820+0000/TASK_0_200/effective_config.yaml",
+          "source_sha256": "709814b18b8f5b0d8f2fb332560a3722fac77b940e675124c2c201a96fcf214f"
+        },
+        {
+          "source_bytes": 1336,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/canonical/math500_tah_engine/20261013T135820+0000/TASK_0_200/run_status.json",
+          "source_sha256": "f251d156d3bb99d4faa7fc7352423020b0e91df21710702fc894a70e52b00515"
+        },
+        {
+          "source_bytes": 8218,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/canonical/protocol_manifest.json",
+          "source_sha256": "f65a602c3f2385134912b35c7f5c107aa49269def7946e285ca52bee79af4713"
+        },
+        {
+          "source_bytes": 1994,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_long/runs/0001-initial/command.json",
+          "source_sha256": "46e25481bc2fed053cfbd708d0f9242b8761d53ea0c2488bf39389a5eb210a77"
+        },
+        {
+          "source_bytes": 559,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_long/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_163451/effective_config.yaml",
+          "source_sha256": "181c4476fdc291fa5f88204bba075b1d5234a0a6d0a6b826cc953ddbf6d50875"
+        },
+        {
+          "source_bytes": 3040,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_long/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_163451/job_0.metrics.json",
+          "source_sha256": "87fd053b0a5ee653ff9410966aeaa801f3d6dfb806aa811ded04e3fc3f2d86c5"
+        },
+        {
+          "source_bytes": 340,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_long/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_163451/run_status.json",
+          "source_sha256": "7f64e2b23f39f83dc730c7b7b53f25ee7a5bcc54b80189316b31158e0ff65c0d"
+        },
+        {
+          "source_bytes": 2038,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_short_129_165/runs/0001-initial/command.json",
+          "source_sha256": "bd64d35a6e9af6e2593c3a1112dddbd7c0971d8a9b205d99eeb31ccefd5e44e6"
+        },
+        {
+          "source_bytes": 559,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_short_129_165/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_162528/TASK_128_165/effective_config.yaml",
+          "source_sha256": "42ef372e8e4c4feee1f82cf9c6e1556817124674393e9a04ca7e9f088a77c046"
+        },
+        {
+          "source_bytes": 4488,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_short_129_165/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_162528/TASK_128_165/job_0.metrics.json",
+          "source_sha256": "169ea45287ee65a482713bdfc1f7a3e898c8bcb86d62a13bac22eac4a5b96744"
+        },
+        {
+          "source_bytes": 342,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_short_129_165/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_162528/TASK_128_165/run_status.json",
+          "source_sha256": "9c206e1a2b49d5d3c08bc1b26df3151a9479e99e9253fa66caff3dc812a738c4"
+        },
+        {
+          "source_bytes": 2038,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_short_167_198/runs/0001-initial/command.json",
+          "source_sha256": "8db4039a61cd0279d1a14ad034388bfb596b316dba14fe783cd58d4d4ff9c898"
+        },
+        {
+          "source_bytes": 559,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_short_167_198/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_163042/TASK_166_198/effective_config.yaml",
+          "source_sha256": "42ef372e8e4c4feee1f82cf9c6e1556817124674393e9a04ca7e9f088a77c046"
+        },
+        {
+          "source_bytes": 4444,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_short_167_198/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_163042/TASK_166_198/job_0.metrics.json",
+          "source_sha256": "90c49d561abb5fcb1104a5da43fced37a2ddc079ef35f265cf678bc20c56e644"
+        },
+        {
+          "source_bytes": 342,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_short_167_198/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_163042/TASK_166_198/run_status.json",
+          "source_sha256": "f2b44553bc6d4ab256637c4f4cb3d2acf38d18876895b0b74e31faff9f16a90f"
+        },
+        {
+          "source_bytes": 2014,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_short_1_81/runs/0001-initial/command.json",
+          "source_sha256": "26c4fe21c0e7d0cb913a61eaef455b8a20fb2f37a8571ceb8fb30ffefdc7a158"
+        },
+        {
+          "source_bytes": 559,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_short_1_81/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_160906/TASK_0_81/effective_config.yaml",
+          "source_sha256": "42ef372e8e4c4feee1f82cf9c6e1556817124674393e9a04ca7e9f088a77c046"
+        },
+        {
+          "source_bytes": 4492,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_short_1_81/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_160906/TASK_0_81/job_0.metrics.json",
+          "source_sha256": "4f3d246ef7c158a4995fbb055dd1abe327c5ae17b6c7357131900557d9d2e87c"
+        },
+        {
+          "source_bytes": 344,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_short_1_81/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_160906/TASK_0_81/run_status.json",
+          "source_sha256": "ea1e573d51e854d169704fe2e9fa3b51ffccfe8e461368cfdc7bb07848b804b0"
+        },
+        {
+          "source_bytes": 2022,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_short_83_92/runs/0001-initial/command.json",
+          "source_sha256": "557b534b3d52aa3c4d09869b5922e0ffbcf2e9a9b090ff30f93218edbfb54227"
+        },
+        {
+          "source_bytes": 559,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_short_83_92/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_161828/TASK_82_92/effective_config.yaml",
+          "source_sha256": "42ef372e8e4c4feee1f82cf9c6e1556817124674393e9a04ca7e9f088a77c046"
+        },
+        {
+          "source_bytes": 3336,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_short_83_92/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_161828/TASK_82_92/job_0.metrics.json",
+          "source_sha256": "2596c4c28764306e20049e40cb0ffa05ea68e8791abd1a4efb2865221a4a5c4d"
+        },
+        {
+          "source_bytes": 342,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_short_83_92/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_161828/TASK_82_92/run_status.json",
+          "source_sha256": "c318fd557eb3dbed1658cb4d1e15fe41799caff467128c48cbc62143b092084e"
+        },
+        {
+          "source_bytes": 2030,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_short_94_127/runs/0001-initial/command.json",
+          "source_sha256": "358bf61afea19c8f49761d890f6740d5e77f38164e6eb6f72a9855d7009fd74b"
+        },
+        {
+          "source_bytes": 559,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_short_94_127/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_162026/TASK_93_127/effective_config.yaml",
+          "source_sha256": "42ef372e8e4c4feee1f82cf9c6e1556817124674393e9a04ca7e9f088a77c046"
+        },
+        {
+          "source_bytes": 4488,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_short_94_127/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_162026/TASK_93_127/job_0.metrics.json",
+          "source_sha256": "90d38c67e1729c8461d539888b276b2ed44a23c7adaa9983e4e4f86bcc0c1ec6"
+        },
+        {
+          "source_bytes": 342,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/gpqa_short_94_127/runs/0001-initial/eval_output/gpqa_tah_engine/20261013_162026/TASK_93_127/run_status.json",
+          "source_sha256": "faaeb19f26f5d9dff55884e00961d810fd3d5777aca0cd723a3b8e935215012f"
+        },
+        {
+          "source_bytes": 2025,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/math500_0_200/runs/0001-initial/command.json",
+          "source_sha256": "36df0af6ab7bcff7b4f8af3c073579aacd0e1f808e9fd670a562e23431fb166c"
+        },
+        {
+          "source_bytes": 559,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/math500_0_200/runs/0001-initial/eval_output/math500_tah_engine/20261013_155822/TASK_0_200/effective_config.yaml",
+          "source_sha256": "42ef372e8e4c4feee1f82cf9c6e1556817124674393e9a04ca7e9f088a77c046"
+        },
+        {
+          "source_bytes": 4447,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/math500_0_200/runs/0001-initial/eval_output/math500_tah_engine/20261013_155822/TASK_0_200/job_0.metrics.json",
+          "source_sha256": "86a4771a004b4b9497fcf7d88b7ceefc1a38ffa7ba35722b5e15fbcfc20e5de1"
+        },
+        {
+          "source_bytes": 347,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/groups/math500_0_200/runs/0001-initial/eval_output/math500_tah_engine/20261013_155822/TASK_0_200/run_status.json",
+          "source_sha256": "836720280d81783b10015a65ef9610f189c152a6cb44935459a224d9c187fe6f"
+        },
+        {
+          "source_bytes": 32358,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/canonical/gpqa_tah/20261013T151427+0000/detailed_results.csv",
+          "source_sha256": "e478dc701c64a30b1bf01bb5f93a96eafbe85ce71bbdef389abdca6f71143488"
+        },
+        {
+          "source_bytes": 261,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/canonical/gpqa_tah/20261013T151427+0000/effective_config.yaml",
+          "source_sha256": "c42783d6978cf56f990fecaaa73ae15ce7c62f5f757bad4944432c2e53cf2d3e"
+        },
+        {
+          "source_bytes": 1328,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/canonical/gpqa_tah/20261013T151427+0000/run_status.json",
+          "source_sha256": "7682811698ca4a103791295e9fd91dc2253c775f9ab5e1b620dd2b5d5b6efc97"
+        },
+        {
+          "source_bytes": 47734,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/canonical/math500_tah/20261013T151427+0000/TASK_0_200/detailed_results.csv",
+          "source_sha256": "cb1122c8bce7f7bb56a0e611535d3bae7d69bd8d8c6c2ca85a2f913b2d6216ca"
+        },
+        {
+          "source_bytes": 166,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/canonical/math500_tah/20261013T151427+0000/TASK_0_200/effective_config.yaml",
+          "source_sha256": "06f9b97b1b01dc8f9df60f855974cd3eec5bb11075f0b85b5cf5bb71252c169a"
+        },
+        {
+          "source_bytes": 1331,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/canonical/math500_tah/20261013T151427+0000/TASK_0_200/run_status.json",
+          "source_sha256": "8f23859801acb18b3890dcda32fa3c2106558f9337dc176f2576546003222bf3"
+        },
+        {
+          "source_bytes": 8213,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/canonical/protocol_manifest.json",
+          "source_sha256": "1598026647666c90917a68d17f9d98926acf12874f298bc4bb2d8382eb1fceeb"
+        },
+        {
+          "source_bytes": 2009,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/groups/gpqa_long/runs/0001-initial/command.json",
+          "source_sha256": "2fd121dee9a40e2e88eb10814ab0a87bb02fdf8c07ba1d0995c93413f1f40042"
+        },
+        {
+          "source_bytes": 561,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/groups/gpqa_long/runs/0001-initial/eval_output/gpqa_tah/20261014_024312/effective_config.yaml",
+          "source_sha256": "a1238e5038adb925ec2761e25bbba344d630a4ba906b9b66f028d8bc9136a8e3"
+        },
+        {
+          "source_bytes": 335,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/groups/gpqa_long/runs/0001-initial/eval_output/gpqa_tah/20261014_024312/run_status.json",
+          "source_sha256": "456539b24627c51f557fe044fd5160dbbd1ea980f6534358c4ff06e00a034277"
+        },
+        {
+          "source_bytes": 2053,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/groups/gpqa_short_129_165/runs/0001-initial/command.json",
+          "source_sha256": "4612828c1e5a0673e1b2a65f67081c3368af45459905d2e01b51e95542f297be"
+        },
+        {
+          "source_bytes": 561,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/groups/gpqa_short_129_165/runs/0001-initial/eval_output/gpqa_tah/20261014_004109/TASK_128_165/effective_config.yaml",
+          "source_sha256": "8edfa02fb124d931400205cdcd7a08dcad0fa9710e54e92a889aac00fe680a68"
+        },
+        {
+          "source_bytes": 337,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/groups/gpqa_short_129_165/runs/0001-initial/eval_output/gpqa_tah/20261014_004109/TASK_128_165/run_status.json",
+          "source_sha256": "b5502f8a0fed34a014036faa214780ad20733ad474ffedef9b177279f12d1b83"
+        },
+        {
+          "source_bytes": 2053,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/groups/gpqa_short_167_198/runs/0001-initial/command.json",
+          "source_sha256": "03a993e1597791cac0fd09fa11dd71d20ca3f7080b79c1e39e9bd225602ae4c3"
+        },
+        {
+          "source_bytes": 561,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/groups/gpqa_short_167_198/runs/0001-initial/eval_output/gpqa_tah/20261014_014639/TASK_166_198/effective_config.yaml",
+          "source_sha256": "8edfa02fb124d931400205cdcd7a08dcad0fa9710e54e92a889aac00fe680a68"
+        },
+        {
+          "source_bytes": 337,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/groups/gpqa_short_167_198/runs/0001-initial/eval_output/gpqa_tah/20261014_014639/TASK_166_198/run_status.json",
+          "source_sha256": "658f4ba02048c8bec81981b9da573bc639b273804af9365521e33de4cc77ee36"
+        },
+        {
+          "source_bytes": 2029,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/groups/gpqa_short_1_81/runs/0001-initial/command.json",
+          "source_sha256": "0518b4551b5db66606ce2d03439c6ea4f20974a755174d6edd0aeeada64d44cb"
+        },
+        {
+          "source_bytes": 561,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/groups/gpqa_short_1_81/runs/0001-initial/eval_output/gpqa_tah/20261013_205614/TASK_0_81/effective_config.yaml",
+          "source_sha256": "8edfa02fb124d931400205cdcd7a08dcad0fa9710e54e92a889aac00fe680a68"
+        },
+        {
+          "source_bytes": 339,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/groups/gpqa_short_1_81/runs/0001-initial/eval_output/gpqa_tah/20261013_205614/TASK_0_81/run_status.json",
+          "source_sha256": "1cf0d363c9b8660ab3f3428110f99a8030a1e6e6f3947178fbef7327d1543751"
+        },
+        {
+          "source_bytes": 2037,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/groups/gpqa_short_83_92/runs/0001-initial/command.json",
+          "source_sha256": "497a7d2478220a267c69a1f0251074132f6e83308e46f87d0aa32272e214ea68"
+        },
+        {
+          "source_bytes": 561,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/groups/gpqa_short_83_92/runs/0001-initial/eval_output/gpqa_tah/20261013_232041/TASK_82_92/effective_config.yaml",
+          "source_sha256": "8edfa02fb124d931400205cdcd7a08dcad0fa9710e54e92a889aac00fe680a68"
+        },
+        {
+          "source_bytes": 337,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/groups/gpqa_short_83_92/runs/0001-initial/eval_output/gpqa_tah/20261013_232041/TASK_82_92/run_status.json",
+          "source_sha256": "7cac99ad3cb7f906d7b4db0cacafd31df46b6f17c1c010f060dadc30a2c698bc"
+        },
+        {
+          "source_bytes": 2045,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/groups/gpqa_short_94_127/runs/0001-initial/command.json",
+          "source_sha256": "78de1cff6ef3fe918475d5f7e24b6e476b395c8a925b5db414d3645bfa0b3abf"
+        },
+        {
+          "source_bytes": 561,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/groups/gpqa_short_94_127/runs/0001-initial/eval_output/gpqa_tah/20261013_233926/TASK_93_127/effective_config.yaml",
+          "source_sha256": "8edfa02fb124d931400205cdcd7a08dcad0fa9710e54e92a889aac00fe680a68"
+        },
+        {
+          "source_bytes": 337,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/groups/gpqa_short_94_127/runs/0001-initial/eval_output/gpqa_tah/20261013_233926/TASK_93_127/run_status.json",
+          "source_sha256": "b7f4522362662f883ebdcaefb46642e90b6b7b199bd568441b8f8c49f29c2556"
+        },
+        {
+          "source_bytes": 2040,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/groups/math500_0_200/runs/0001-initial/command.json",
+          "source_sha256": "6a53bc9060303badcb718146b01275168200e8f250205cfefe44a8d9be6e070d"
+        },
+        {
+          "source_bytes": 561,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/groups/math500_0_200/runs/0001-initial/eval_output/math500_tah/20261013_171429/TASK_0_200/effective_config.yaml",
+          "source_sha256": "8edfa02fb124d931400205cdcd7a08dcad0fa9710e54e92a889aac00fe680a68"
+        },
+        {
+          "source_bytes": 342,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/groups/math500_0_200/runs/0001-initial/eval_output/math500_tah/20261013_171429/TASK_0_200/run_status.json",
+          "source_sha256": "279de4e0ee6188f698c2d1618462ea0eb57d0d095b02da754a1be1a2f5fe7cc3"
+        },
+        {
+          "source_bytes": 34210,
+          "source_path": "data/engine/wp10/wacc-seed2024/gpqa_tah_engine/20261013_133615/detailed_results.csv",
+          "source_sha256": "c3ec3e588ca1b0b6be93e4813126ca7c0d6f7105b2a799d2707a2d28252bbe9f"
+        },
+        {
+          "source_bytes": 626,
+          "source_path": "data/engine/wp10/wacc-seed2024/gpqa_tah_engine/20261013_133615/effective_config.yaml",
+          "source_sha256": "f55a1a09c37db3faf34b977679188db14a2676d9715cd2d69682bbc235f5d266"
+        },
+        {
+          "source_bytes": 4477,
+          "source_path": "data/engine/wp10/wacc-seed2024/gpqa_tah_engine/20261013_133615/job_0.metrics.json",
+          "source_sha256": "f63fd68b9e57070c29dd9dadc809a8c488055d4b6f7d8d6731c3e996d0b804e8"
+        },
+        {
+          "source_bytes": 347,
+          "source_path": "data/engine/wp10/wacc-seed2024/gpqa_tah_engine/20261013_133615/run_status.json",
+          "source_sha256": "f7f883b2bb7f50f98e5e66f32aac4d4091f1e0f25954d74aa3b99f36d4f5f494"
+        },
+        {
+          "source_bytes": 39133,
+          "source_path": "data/engine/wp10/wacc-seed2024/math500_tah_engine/20261013_133615/TASK_0_200/detailed_results.csv",
+          "source_sha256": "6b0c7d596dfad16a972bd2257773e0b6ddaea9fece22885681b31b2e3740e561"
+        },
+        {
+          "source_bytes": 626,
+          "source_path": "data/engine/wp10/wacc-seed2024/math500_tah_engine/20261013_133615/TASK_0_200/effective_config.yaml",
+          "source_sha256": "f55a1a09c37db3faf34b977679188db14a2676d9715cd2d69682bbc235f5d266"
+        },
+        {
+          "source_bytes": 4477,
+          "source_path": "data/engine/wp10/wacc-seed2024/math500_tah_engine/20261013_133615/TASK_0_200/job_0.metrics.json",
+          "source_sha256": "f63fd68b9e57070c29dd9dadc809a8c488055d4b6f7d8d6731c3e996d0b804e8"
+        },
+        {
+          "source_bytes": 350,
+          "source_path": "data/engine/wp10/wacc-seed2024/math500_tah_engine/20261013_133615/TASK_0_200/run_status.json",
+          "source_sha256": "cb7b3a811b730acaf1421bf7c8479b2790e3d3e3be8687d761ea8af91ef25e89"
+        },
+        {
+          "note": "frozen engine inventory digest",
+          "source_path": "git:1cb256251e2da8e9749be925e28ffe6e513b3e14:tah/engine/*.py",
+          "source_sha256": "48cd4140592984c0ca31eb7729c12fc209938fa8145987ddb875256dfa01915f"
+        }
+      ],
+      "top_level_keys_or_columns": [
+        "complete",
+        "frozen_engine_sha256",
+        "frozen_engine_commit",
+        "frozen_engine_inventory_scope",
+        "source_inventory",
+        "reference",
+        "engine",
+        "runs",
+        "expected_problem_ids",
+        "repeats",
+        "deviations",
+        "scope"
+      ]
+    },
+    "r1/samples.csv": {
+      "bytes": 200558,
+      "encoding": "curated CSV",
+      "purpose": "Confirmatory R1 per-sample results; only fields used by analysis and comparison are retained.",
+      "sha256": "990134dc5e8bc2dec51395261f16731843b47d0519d6d27778c06841a8d1e447",
+      "sources": [
+        {
+          "source_bytes": 34104,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/canonical/gpqa_tah_engine/20261013T143648+0000/detailed_results.csv",
+          "source_sha256": "c6b8335198fc5c0722aba1555a239f5dea175c3eb0a317a8d174d41ae6221676"
+        },
+        {
+          "source_bytes": 39295,
+          "source_path": "data/engine/wacc_engine_protocol_seed1234/canonical/math500_tah_engine/20261013T143648+0000/TASK_0_200/detailed_results.csv",
+          "source_sha256": "6cfad1ce6335fb840ce8978dd982ece0d57b0fe6282cbf7126c7c27ea22d5b09"
+        },
+        {
+          "source_bytes": 34219,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/canonical/gpqa_tah_engine/20261013T135820+0000/detailed_results.csv",
+          "source_sha256": "de7cc65391421de98bfc04c0e60550b513e07f511f5145749ba0480986786017"
+        },
+        {
+          "source_bytes": 39099,
+          "source_path": "data/engine/wacc_engine_protocol_seed42/canonical/math500_tah_engine/20261013T135820+0000/TASK_0_200/detailed_results.csv",
+          "source_sha256": "2e7de75ff925d523bae733c543172618d5f945f9c44339f842fd1e81b486f290"
+        },
+        {
+          "source_bytes": 32358,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/canonical/gpqa_tah/20261013T151427+0000/detailed_results.csv",
+          "source_sha256": "e478dc701c64a30b1bf01bb5f93a96eafbe85ce71bbdef389abdca6f71143488"
+        },
+        {
+          "source_bytes": 47734,
+          "source_path": "data/engine/wacc_reference_protocol_seed1234/canonical/math500_tah/20261013T151427+0000/TASK_0_200/detailed_results.csv",
+          "source_sha256": "cb1122c8bce7f7bb56a0e611535d3bae7d69bd8d8c6c2ca85a2f913b2d6216ca"
+        },
+        {
+          "source_bytes": 34210,
+          "source_path": "data/engine/wp10/wacc-seed2024/gpqa_tah_engine/20261013_133615/detailed_results.csv",
+          "source_sha256": "c3ec3e588ca1b0b6be93e4813126ca7c0d6f7105b2a799d2707a2d28252bbe9f"
+        },
+        {
+          "source_bytes": 39133,
+          "source_path": "data/engine/wp10/wacc-seed2024/math500_tah_engine/20261013_133615/TASK_0_200/detailed_results.csv",
+          "source_sha256": "6b0c7d596dfad16a972bd2257773e0b6ddaea9fece22885681b31b2e3740e561"
+        }
+      ],
+      "top_level_keys_or_columns": [
+        "run",
+        "dataset",
+        "problem_id",
+        "sample_idx",
+        "is_correct",
+        "pass_stat_tokens",
+        "mean_passes_per_token",
+        "fraction_tokens_at_least_2_passes"
+      ]
+    },
     "robustness.json": {
       "bytes": 10782,
       "encoding": "curated JSON",
@@ -1670,14 +2093,14 @@
   "schema_version": 2,
   "seeds": {
     "calibration_selection": 9,
-    "engine_exploratory": [
+    "performance": 0,
+    "r1_engine": [
       42,
-      1234
-    ],
-    "engine_frozen_r1_input": [
+      1234,
       2024
     ],
-    "performance": 0,
-    "reference_exploratory": 42
+    "r1_reference": [
+      1234
+    ]
   }
 }

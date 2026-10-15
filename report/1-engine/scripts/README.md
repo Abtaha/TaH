@@ -64,17 +64,18 @@ failures stop collection. No gate limits are changed to make a run pass.
 `validation_cli.py` redirects fixture paths and loads original W-perf prompt
 records through `sources.json`; `cached_validation.py` adapts the cached test's
 output paths; `export_fixture_limits.py` verifies regenerated production
-fixtures. `longctx.py` reads the original exploratory generations named in
+fixtures. `longctx.py` reads the original W-perf prompt records named in
 `sources.json`. These raw files, models and datasets are prerequisites for GPU
 reproduction, but not CPU analysis. `origins.json` records the adapted scripts'
 source hashes. Full tensors/traces/text remain in experiment directories.
 
-`exploratory` only reimports the historical per-sample CSVs: recovered reference
-batches changed RNG streams and cannot be replayed exactly. `accuracy` instead
-runs the pre-registered protocol, merges canonical results and copies only CSVs,
-completion/configuration/protocol records and a frozen source inventory into
-`data/r1/`. Full generated text remains at the recorded experiment paths. See
-[R1.md](R1.md); inspect protocol deviations before treating results as confirmatory.
+`accuracy` runs the pre-registered protocol and merges canonical results.
+`scripts/curate_r1.py` imports completed experiment directories on CPU and writes
+`data/r1/samples.csv` plus `data/r1/runs.json`; it hashes the frozen engine
+sources at the recorded commit with `git show`. The compact sample table keeps
+only the columns used by analysis and comparison. Full generated text, status
+records, configs, group commands and telemetry remain at the recorded source
+paths. See [R1.md](R1.md) for the input contract.
 
 ## Data files
 
@@ -95,10 +96,13 @@ source paths.
 - `port.json`: second-GPU validation (L40S) parsed from the operator's summary
   report with `curate.py port`; raw reports stay on that machine. Procedure:
   `dev-guide/engine.md`, "Validating on a new GPU or machine".
-- `evaluations/{reference-exploratory,engine-seed42,engine-seed1234,engine-seed2024}/{math500,gpqa}/detailed_results.csv`:
-  per-sample problem/repeat key, correctness, output length, answer extraction
-  and pass summaries (times in seconds). The accuracy table and the exploratory
-  estimate are computed from these.
+- `r1/samples.csv`: one long-form confirmatory sample table with the run,
+  dataset, problem/repeat key, correctness and pass statistics used by analysis.
+- `r1/runs.json`: run statuses, expected IDs, settings, group summaries,
+  telemetry, frozen engine inventory and protocol-manifest hashes.
+  `MANIFEST.json` retains source paths and hashes for both compact files;
+  full generations and raw run artifacts remain at those source paths.
+  `analyze.py` verifies protocol settings and complete coverage.
 
 ## Refreshing performance
 

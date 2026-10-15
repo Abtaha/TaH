@@ -82,41 +82,29 @@ def plan(step,out):
                 dest=out/f'r1-{backend}-{seed}'
                 add(dest.name,['script/tah/evaluation/run_protocol.py','run','--config','script/tah/recipes/qwen3_1.7/protocol_wacc.yaml','--model_path','models/TaH-plus-1.7B','--backend',backend,'--seed',seed,'--output_root',dest])
                 add('merge-'+dest.name,['script/tah/evaluation/run_protocol.py','merge','--output_root',dest],False)
-    elif step!='exploratory':raise ValueError(step)
+    else:raise ValueError(step)
     return commands,sources
-
-
-def portable_path(path):
-    path=Path(path).resolve()
-    if path.is_relative_to(REPO.resolve()):return str(path.relative_to(REPO.resolve()))
-    if path.is_relative_to(Path.home()):return '~/'+str(path.relative_to(Path.home()))
-    return str(path)
-
-
-def register_copy(source,destination,purpose,manifest):
-    b=source.read_bytes();target=DATA/destination;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(b)
-    sha=hashlib.sha256(b).hexdigest()
-    manifest['files'][destination]=dict(sha256=sha,source_sha256=sha,bytes=len(b),source_bytes=len(b),source_path=portable_path(source),source_mtime_utc=datetime.fromtimestamp(source.stat().st_mtime,timezone.utc).isoformat(),encoding='original bytes',purpose=purpose,top_level_keys_or_columns=(next(__import__('csv').reader(b.decode().splitlines())) if source.suffix=='.csv' else list(json.loads(b)) if source.suffix=='.json' else 'YAML mapping'))
 
 
 def source_inventory():
     return {str(p.relative_to(REPO)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted((REPO/'tah/engine').glob('*.py'))}
 
 
-def accuracy_inputs(out,inventory):
+def accuracy_inputs(out,inventory,commit):
+    sys.path.insert(0,str(SCRIPTS))
+    try:
+        import curate_r1
+    finally:
+        sys.path.pop(0)
     digest=hashlib.sha256(json.dumps(inventory,sort_keys=True).encode()).hexdigest()
-    manifest=json.loads((DATA/'MANIFEST.json').read_text());specs=[]
-    for backend,seeds in [('tah',[1234]),('tah_engine',[42,1234,2024])]:
-        for seed in seeds:
-            name=f'r1-{backend}-{seed}';canonical=out/name/'canonical'
-            if not list(canonical.rglob('detailed_results.csv')):raise ValueError('Missing canonical CSVs: '+str(canonical))
-            for file in canonical.rglob('*'):
-                if file.is_file() and file.name in ('detailed_results.csv','run_status.json','effective_config.yaml','protocol_manifest.json'):
-                    register_copy(file,'r1/'+name+'/'+str(file.relative_to(canonical)),'Confirmatory sample statistics and protocol provenance; full generations retained at source.',manifest)
-            specs.append(dict(seed=seed,path='r1/'+name,frozen_engine_sha256=digest))
-    index=dict(complete=True,reference=specs[0],engine=specs[1:],frozen_engine_sha256=digest,source_inventory=inventory,deviations=[])
-    dump(out/'r1-inputs.json',index);register_copy(out/'r1-inputs.json','r1/inputs.json','Frozen confirmatory run inventory and deviations.',manifest)
-    dump(DATA/'MANIFEST.json',manifest)
+    specs=[]
+    for name,backend,seed in [('reference-seed1234','tah',1234),('engine-seed42','tah_engine',42),
+                              ('engine-seed1234','tah_engine',1234),('engine-seed2024','tah_engine',2024)]:
+        specs.append((name,backend,seed,out/f'r1-{backend}-{seed}','protocol'))
+    sample_bytes,index,sources,rows=curate_r1.collect(specs,inventory,digest,commit,direct_2024=False)
+    count,file_count=curate_r1.store_compact_archive(sample_bytes,index,sources,rows,drop_legacy=True)
+    dump(out/'r1-index.json',index)
+    print(f'Imported {count} confirmatory samples in {file_count} chapter data files.')
 
 
 def main():
@@ -128,7 +116,7 @@ def main():
     parser.add_argument('--gpu',default='0')
     args=parser.parse_args()
     if not args.step:
-        for name,item in policy.items():print(f"{name}: {item['runtime']}; {item['device']}; "+('reproduction/fixtures/' if name=='fixtures' else 'data/r1/' if name=='accuracy' else 'data/evaluations/' if name=='exploratory' else 'data/speed.json' if name=='reference' else f'data/{name}.json'))
+        for name,item in policy.items():print(f"{name}: {item['runtime']}; {item['device']}; "+('reproduction/fixtures/' if name=='fixtures' else 'data/r1/samples.csv, data/r1/runs.json' if name=='accuracy' else 'data/speed.json' if name=='reference' else f'data/{name}.json'))
         print('Use STEP --dry-run for exact commands; run fixtures before equivalence/negative. No work executed.')
         return
     out=args.output_root.resolve()
@@ -151,7 +139,8 @@ def main():
         if freeze.exists() and json.loads(freeze.read_text())!=inventory:raise ValueError('Engine changed since R1 began; do not mix versions')
         dump(freeze,inventory)
     env=dict(os.environ,PYTHONPATH=str(REPO),PYTHONDONTWRITEBYTECODE='1',ENGINE_REPORT_OUTPUT=str(out),TAH_GTF_FIXTURES=str(out/'fixtures'),TAH_GTF_TOLERANCES=str(out/'fixture-limits/tolerances.json'),TAH_GTF_RESULTS=str(out/'full'))
-    dump(out/(args.step+'-commands.json'),dict(commands=commands,engine_sources=inventory,git_commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=REPO,text=True).strip(),started_utc=datetime.now(timezone.utc).isoformat()))
+    commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=REPO,text=True).strip()
+    dump(out/(args.step+'-commands.json'),dict(commands=commands,engine_sources=inventory,git_commit=commit,started_utc=datetime.now(timezone.utc).isoformat()))
     for item in commands:
         env['CUDA_VISIBLE_DEVICES']=args.gpu if item['gpu'] else ''
         log=out/(item['label']+'.log')
@@ -163,16 +152,9 @@ def main():
             value=json.loads(line.split('Forced restart CUDA report:',1)[1]);value['status']='PASS';dump(out/'restart.json',value)
     if inventory!=source_inventory():raise ValueError('Engine changed during the experiment; outputs retained but not imported')
     if args.step=='exact':
-        stale=[v for k,v in sources.items() if k!='exact/tests' and k!='exact/fixtures' and (REPO/v).stat().st_mtime<started]
+        stale=[v for k,v in sources.items() if k not in ('exact/tests','exact/fixtures') and not k.startswith('exact/config/') and (REPO/v).stat().st_mtime<started]
         if stale:raise ValueError('Reports not rewritten by this run (tests skipped?): '+', '.join(stale))
-    if args.step=='exploratory':
-        manifest=json.loads((DATA/'MANIFEST.json').read_text())
-        for name,entry in list(manifest['files'].items()):
-            if name.startswith('evaluations/'):
-                source=Path(entry['source_path']).expanduser();source=source if source.is_absolute() else REPO/source
-                register_copy(source,name,entry['purpose'],manifest)
-        dump(DATA/'MANIFEST.json',manifest)
-    elif args.step=='accuracy':accuracy_inputs(out,inventory)
+    if args.step=='accuracy':accuracy_inputs(out,inventory,commit)
     elif args.step not in ('fixtures','reference'):
         dump(out/(args.step+'-sources.json'),sources);Collector(sources).collect(args.step)
     subprocess.run([str(PY),str(ROOT/'analyze.py')],env=dict(os.environ,CUDA_VISIBLE_DEVICES='',PYTHONDONTWRITEBYTECODE='1'),check=True)

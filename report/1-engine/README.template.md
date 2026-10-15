@@ -6,7 +6,7 @@
 
 Think-at-Hard (TaH) lets a learned decider send hard tokens through the model a second time, using a low-rank adapter (LoRA). The reference implementation is slow: a Python loop handles one token at a time, extra passes are separate model calls and batches are padded to the longest request.
 
-The engine runs the same algorithm with mixed-depth batches, a shared key/value (KV) cache and CUDA graphs. Its correctness rests on three steps: same algorithm (exact on CPU), each model step within {{noise_multiplier}}× the reference's own numerical noise, and accuracy within a pre-registered ±{{margin}} pp margin (R1: {{r1status}}; exploratory engine minus reference: {{delta}} pp). On the {{gpu}} it generates **{{headline_rate}} tokens/s, {{headline_speedup}}× the reference**.
+The engine runs the same algorithm with mixed-depth batches, a shared key/value (KV) cache and CUDA graphs. Correctness is tested at three levels: same algorithm (exact on CPU), each model step within {{noise_multiplier}}× the reference's own numerical noise, and accuracy against a pre-registered ±{{margin}} pp margin. That accuracy test (R1) gives **{{r1_verdict}}**: engine minus reference {{r1_delta}} pp (90% CI [{{r1_low}}, {{r1_high}}], half-width {{r1_halfwidth}} pp against the ±{{margin}} pp margin), so the accuracy test alone cannot settle equivalence; the numerical comparison against a high-precision oracle (R1-O) is the stronger test. On the {{gpu}}, the engine generates **{{headline_rate}} tokens/s, {{headline_speedup}}× the reference** on W-perf (128 requests, up to 4096 new tokens).
 
 ## What the engine changes
 
@@ -45,24 +45,19 @@ Logit RMSE ratios on long contexts stay between {{long_min}} and {{long_max}}; t
 
 **Reproduce:** `./reproduce.sh equivalence` ({{equivalence_runtime}}, {{equivalence_device}}, after `fixtures`) writes `data/equivalence.json`; `./reproduce.sh diagnostics` ({{diagnostics_runtime}}, {{diagnostics_device}}) writes `data/diagnostics.json`.
 
-#### Level 2 — benchmark accuracy is equivalent (pre-registered R1)
+#### Level 2 — benchmark accuracy (pre-registered R1)
 
-Workload: MATH500 problems 0–199 and GPQA-Diamond (198), 2 samples each, up to {{cap}} new tokens, temperature 0.6. The pre-registered test ([protocol](../PROTOCOL.md)) is a TOST on per-problem paired differences: the {{confidence}}% confidence interval (CI) of engine minus reference over {{problems}} problems must lie inside ±{{margin}} pp. Two reference runs are compared the same way, showing natural run-to-run spread.
+Workload: MATH500 problems 0–199 and GPQA-Diamond (198), 2 samples per problem, up to {{cap}} new tokens, temperature 0.6, top-p 0.95, top-k 20, decider threshold 0.9. The reference ran once (seed 1234), the frozen engine three times (seeds 42, 1234, 2024). Per problem, accuracy is the mean over all samples of a backend (6 engine, 2 reference). The pre-registered test ([protocol](../PROTOCOL.md)) is a TOST: the {{confidence}}% confidence interval (CI) of the pooled engine − reference difference over {{problems}} problems must lie inside ±{{margin}} pp. Mean passes per generated token must agree within ±10%.
 
 {{runs_table}}
 
-{{#r1pending}}**Confirmatory R1: pending.** The reference run (seed 1234) and frozen-engine runs are not yet archived in `data/r1/`; `analyze.py` then adds the TOST rows.
+{{#r1pending}}**Confirmatory R1: pending.** The runs are not yet archived in `data/r1/`; `analyze.py` then adds the TOST rows.
 {{/r1pending}}{{#r1complete}}{{r1_table}}
 
-The reference-versus-reference rows show the natural spread; the engine rows are the R1 test.
+**Verdict: {{r1_verdict}}.** The pooled interval is [{{r1_low}}, {{r1_high}}] pp; {{r1_reason}}. The test had little room: the interval's half-width is {{r1_halfwidth}} pp, so with this design (one reference run, two samples per problem) it could pass only if the estimate fell within ±{{r1_window}} pp. Per dataset (secondary): MATH500 {{math_delta}} pp, GPQA {{gpqa_delta}} pp. Passes per token, engine/reference: {{passes_ratio}} ({{passes_check}} ±10%). The three engine seeds differ by up to {{engine_spread}} pp per benchmark; paired dataset results are in `tables/r1.tex`.
 {{/r1complete}}
-**Exploratory estimate** (not the R1 test; one reference run; engine seeds 42 and 1234 predate the frozen engine):
 
-{{exploratory_table}}
-
-These data do not show equivalence: the first interval extends beyond -{{margin}} pp (z = {{z}}). One reference run's sampling noise is not averaged out: its two repeats differ by {{split_delta}} pp at one sample per problem, and engine seeds differ by up to {{engine_spread}} pp per benchmark. The confirmatory runs decide.
-
-**Reproduce:** `./reproduce.sh accuracy`: {{accuracy_runtime}}, {{accuracy_device}}; writes `data/r1/`. `./reproduce.sh exploratory` reimports the CSVs on CPU.
+**Reproduce:** `./reproduce.sh accuracy`: {{accuracy_runtime}}, {{accuracy_device}}; writes `data/r1/samples.csv` and `data/r1/runs.json`. `scripts/curate_r1.py` imports existing runs on CPU.
 
 ### Speed
 
@@ -92,8 +87,11 @@ Validated on an {{port_device}} (compute capability {{port_cc}}, driver {{port_d
 
 - Exact (level 0) checks do not cover the full model at full length (CPU compute).
 - `torch.compile` stays off: throughput changes by {{compile_delta}}%, and parity is {{compile_gate}} and greedy generation {{compile_greedy}} on the synthetic learned checkpoint (`./reproduce.sh negative`: {{negative_runtime}}, {{negative_device}}).
-- A restart discards work and may change sampled output.
-- Exploratory accuracy rests on one reference run.
+- A restart (host-swap overflow) discards work and may change sampled output; restarts per engine run: {{restarts_text}}.
+- R1 has one confirmatory reference run (2 samples per problem), whose sampling noise dominates the paired standard error.
+- Earlier exploratory runs exist outside this chapter and are not used.
+- Deviation: {{deviation}}
+- A memory-only fix to `HostSwap._release_cached` (`tah/engine/scheduler.py`; returns cached pinned host blocks, no numerical or scheduling change) postdates R1; some R2 runs include it.
 
 ## Reproduce and data
 
@@ -115,7 +113,7 @@ Steps and data files: [scripts/README.md](scripts/README.md#data-files).
 | Speed, figure | `speed` | `engine_check` perf, profile | {{speed_runtime}} / {{speed_device}} | `speed.json` |
 | Level 1 | `equivalence` | `test_gtf`; cached replay; `generated_gtf`; `engine_check` gen | {{equivalence_runtime}} / {{equivalence_device}} | `equivalence.json` |
 | Long context, sampler | `diagnostics` | `longctx.py` | {{diagnostics_runtime}} / {{diagnostics_device}} | `diagnostics.json` |
-| Level 2 | `accuracy`, `exploratory` | `run_protocol.py`; CSV import | {{accuracy_runtime}} / {{accuracy_device}}; CPU import | `r1/`; `evaluations/` |
+| Level 2 | `accuracy` | `run_protocol.py`; CSV curation | {{accuracy_runtime}} / {{accuracy_device}}; CPU import | `r1/samples.csv`, `r1/runs.json` |
 | Robustness | `robustness` | `engine_check` (four gates); restart test | {{robustness_runtime}} / {{robustness_device}} | `robustness.json` |
 | Portability | operator | `dev-guide/engine.md` | target GPU | `port.json` |
 | Compile | `negative` | compiled `perf`, `gen`, `generated_gtf` | {{negative_runtime}} / {{negative_device}} | `negative.json` |

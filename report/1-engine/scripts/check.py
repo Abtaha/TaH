@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """CPU regression for curated-data integrity, deterministic outputs and the R1 hook.
 
-R1 uses copied historical CSVs as synthetic test inputs inside a temporary
-chapter directory. Those test inputs are never archived or reported as R1.
+R1 uses a temporary copy of the compact confirmatory inputs to exercise the
+comparison adapter and its validation failures.
 """
 import ast
 import hashlib
@@ -19,6 +19,7 @@ sys.dont_write_bytecode=True
 os.environ['CUDA_VISIBLE_DEVICES']=''
 os.environ['PYTHONDONTWRITEBYTECODE']='1'
 ROOT=Path(__file__).resolve().parents[1]
+SCRATCH=ROOT.parents[1]/'data/tmp/wp24'
 
 
 def snapshot():
@@ -53,7 +54,8 @@ def main():
     assert chapter.ratio_cells([zero])[:2]==['exact','exact']
     print('Ratio labels distinguish zero engine errors from exact agreement: PASS')
     chapter.exact_section()
-    with tempfile.TemporaryDirectory(prefix='.check-',dir=ROOT) as temporary:
+    SCRATCH.mkdir(parents=True,exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='check-',dir=SCRATCH) as temporary:
         original=chapter.DATA;chapter.DATA=Path(temporary)
         try:
             bad=json.loads((original/'exact.json').read_text());bad['tiny']['mlp3']['top1_mismatches']=1
@@ -64,43 +66,40 @@ def main():
         finally:chapter.DATA=original
     print('Level 0: exact data accepted, a single mismatch rejected: PASS')
     policy=chapter.read('method.json')['confirmatory']
-    with tempfile.TemporaryDirectory(prefix='.check-',dir=ROOT) as temporary:
+    with tempfile.TemporaryDirectory(prefix='check-',dir=SCRATCH) as temporary:
         tmp=Path(temporary);chapter.DATA=tmp/'data';chapter.TABLES=tmp/'tables'
         chapter.DATA.mkdir();chapter.TABLES.mkdir()
         shutil.copy(ROOT/'data/method.json',chapter.DATA/'method.json')
         assert 'Pending' in chapter.r1_section(policy)
         (chapter.DATA/'r1').mkdir()
         index=dict(complete=False)
-        (chapter.DATA/'r1/inputs.json').write_text(json.dumps(index))
+        (chapter.DATA/'r1/runs.json').write_text(json.dumps(index))
         assert 'Pending' in chapter.r1_section(policy)
-        # Synthetic complete inputs exercise the actual repository compare API.
-        specs=[('reference',1234,'reference-exploratory'),('engine42',42,'engine-seed42'),
-               ('engine1234',1234,'engine-seed1234'),('engine2024',2024,'engine-seed42')]
-        for label,seed,original in [*specs,('earlier',42,'reference-exploratory')]:
-            dest=chapter.DATA/('evaluations/reference-exploratory' if label=='earlier' else 'r1/'+label)
-            for ds,n in policy['problems'].items():
-                leaf=dest/ds;leaf.mkdir(parents=True)
-                shutil.copy(ROOT/f'data/evaluations/{original}/{ds}/detailed_results.csv',leaf/'detailed_results.csv')
-                (leaf/'run_status.json').write_text(json.dumps(dict(status='complete',random_seed=seed,expected_samples=n*2,completed_samples=n*2)))
-        index=dict(complete=True,frozen_engine_sha256='a'*64,reference=dict(seed=1234,path='r1/reference'),
-            engine=[dict(seed=seed,path='r1/'+label,frozen_engine_sha256='a'*64) for label,seed,_ in specs[1:]],deviations=['Synthetic test data only'])
-        path=chapter.DATA/'r1/inputs.json';path.write_text(json.dumps(index))
+        shutil.copy(ROOT/'data/r1/samples.csv',chapter.DATA/'r1/samples.csv')
+        shutil.copy(ROOT/'data/r1/runs.json',chapter.DATA/'r1/runs.json')
+        path=chapter.DATA/'r1/runs.json';index=json.loads(path.read_text())
         result=chapter.r1_section(policy)
-        assert 'Student-t' in result and 'Exploratory reference' in result and 'equivalence_not_shown' in result
+        assert 'ref. 1234' in result and 'Engine' in result and 'Ref. 42' not in result
+        assert chapter.R1_FACTS['r1_verdict']=='equivalence not shown'
         output=json.loads((chapter.TABLES/'r1-analysis.json').read_text())
         assert output['comparisons'][0]['pooled']['n_problems']==sum(policy['problems'].values())
-        index['engine'][0]['seed']=99;path.write_text(json.dumps(index))
+        index_bad=json.loads(json.dumps(index));index_bad['engine'][0]['seed']=99;path.write_text(json.dumps(index_bad))
         try:chapter.r1_section(policy)
         except AssertionError:pass
         else:raise AssertionError('Wrong R1 seed accepted')
-        index['engine'][0]['seed']=42;path.write_text(json.dumps(index))
-        csv=chapter.DATA/'r1/engine42/math500/detailed_results.csv'
-        lines=csv.read_text().splitlines(True)
-        csv.write_text(''.join(lines+lines[1:2]))
+        path.write_text(json.dumps(index))
+        bad=json.loads(json.dumps(index));bad['runs'][1]['groups'][0]['settings']['temperature']=0.7
+        path.write_text(json.dumps(bad))
+        try:chapter.r1_section(policy)
+        except ValueError:pass
+        else:raise AssertionError('Settings differing from the protocol accepted')
+        path.write_text(json.dumps(index))
+        csv=chapter.DATA/'r1/samples.csv';lines=csv.read_text().splitlines(True)
+        csv.write_text(''.join(lines+[lines[1]]))
         try:chapter.r1_section(policy)
         except ValueError:pass
         else:raise AssertionError('Duplicate R1 sample accepted')
-    print('R1: missing/incomplete skip, complete API analysis, wrong-seed and duplicate rejection PASS')
+    print('R1: missing/incomplete skip, compact API analysis, wrong-seed, wrong-settings and duplicate rejection PASS')
     size=sum(p.stat().st_size for p in ROOT.rglob('*') if p.is_file())
     assert size<3_000_000,size
     print(f'Chapter size: {size/1e6:.2f} MB')

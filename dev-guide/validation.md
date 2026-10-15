@@ -111,6 +111,11 @@ CUDA_VISIBLE_DEVICES=0 python -m script.tah.validation.coupled_run run reference
 CUDA_VISIBLE_DEVICES=0 python -m script.tah.validation.coupled_run run oracle --model "$M" --eval-config "$C" --manifest "$F" --pilot 8 --max-new-tokens 512 --out "$O/pilot/oracle"
 ```
 
+Host RAM: `run engine` pins the engine's 8 GiB host swap arena at startup (process
+RSS ≈ engine baseline + 8 GiB; see [guide/engine.md](../guide/engine.md)); `capture.py`
+pins `--host-swap-gb` per engine replay, one replay at a time. Reference and oracle
+runs pin none.
+
 Use `--pilot 8 --max-new-tokens 4096` in **new** directories for a full-context
 memory check before the main run. `--oracle-batch N` (positive integer, default 8)
 sets only the oracle batch; the bf16 reference remains fixed at batch 8.

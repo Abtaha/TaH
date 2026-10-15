@@ -6,7 +6,7 @@ analysis. Chapters curate the results used in the research report; the
 
 | Chapter | Contents | Status |
 | --- | --- | --- |
-| [Engine](1-engine/README.md) | Design, reference self-noise, mechanism checks, performance, robustness, exploratory accuracy and negative results | Curated summary; confirmatory R1 pending |
+| [Engine](1-engine/README.md) | Design, reference self-noise, mechanism checks, performance, robustness, confirmatory accuracy (R1) and negative results | Curated summary; R1 accuracy test complete (equivalence not shown, underpowered); R1-O oracle comparison pending |
 
 Regenerate the engine chapter on CPU:
 
