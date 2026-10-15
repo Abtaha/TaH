@@ -116,8 +116,26 @@ def main():
     parser.add_argument('--gpu',default='0')
     args=parser.parse_args()
     if not args.step:
-        for name,item in policy.items():print(f"{name}: {item['runtime']}; {item['device']}; "+('reproduction/fixtures/' if name=='fixtures' else 'data/r1/samples.csv, data/r1/runs.json' if name=='accuracy' else 'data/speed.json' if name=='reference' else f'data/{name}.json'))
+        for name,item in policy.items():
+            output = ('reproduction/fixtures/' if name=='fixtures' else
+                      'data/r1/samples.csv, data/r1/runs.json' if name=='accuracy' else
+                      'data/speed.json' if name=='reference' else
+                      'data/r2_speed.json' if name=='r2_speed' else
+                      'data/memory_ab.json' if name=='memory_ab' else f'data/{name}.json')
+            print(f"{name}: {item['runtime']}; {item['device']}; {output}")
         print('Use STEP --dry-run for exact commands; run fixtures before equivalence/negative. No work executed.')
+        return
+    if args.step in ('r2_speed', 'memory_ab'):
+        command=[str(PY),SCRIPTS/'curate_wp25.py',args.step]
+        print(shlex.join(map(str,command)),flush=True)
+        if args.step=='r2_speed':
+            print('Reads R2 metrics in data/engine/paper_protocol_seed{42,1234,2024}; then analyze.py refreshes the report.',flush=True)
+        else:
+            print('Reads the saved old/new runs in data/tmp/wp21/gpu/, invokes data/tmp/wp21/ab.py compare, then analyze.py refreshes the report.',flush=True)
+        if args.dry_run:return
+        env=dict(os.environ,CUDA_VISIBLE_DEVICES='',PYTHONDONTWRITEBYTECODE='1')
+        subprocess.run(list(map(str,command)),cwd=REPO,env=env,check=True)
+        subprocess.run([str(PY),str(ROOT/'analyze.py')],cwd=REPO,env=env,check=True)
         return
     out=args.output_root.resolve()
     if out==DATA or out.is_relative_to(DATA):parser.error('Keep full experiment outputs outside curated data/')

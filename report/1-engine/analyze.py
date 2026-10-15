@@ -252,7 +252,7 @@ def compare_r1_samples(index,rows,expected):
     by_run={name:{dataset:[] for dataset in expected} for name in [index['reference']['name'],*[x['name'] for x in index['engine']]]}
     for row in rows:
         by_run[row['run']][row['dataset']].append(row)
-    scratch=REPO/'data/tmp/wp24'
+    scratch=REPO/'data/tmp/wp25/checks/1-engine'
     scratch.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='compare-r1-',dir=scratch) as temporary:
         roots={}
@@ -427,6 +427,7 @@ def main():
     TABLES.mkdir(exist_ok=True);(ROOT/'figures').mkdir(exist_ok=True)
     (TABLES/'exploratory.tex').unlink(missing_ok=True)
     manifest=verify();policy=read('method.json');perf=read('speed.json');eq=read('equivalence.json')
+    r2_speed=read('r2_speed.json');memory_ab=read('memory_ab.json')
     confirm=policy['confirmatory']
     values={'margin':str(confirm['equivalence_margin_pp']),
             'confidence':fmt(100*confirm['confidence'],0),
@@ -443,7 +444,37 @@ def main():
     values['speed_table']=table('speed',['Backend','Tokens/s','Speedup','Peak memory (GiB)'],rows)
     pdf_bars(ROOT/'figures/throughput.pdf',labels,rates)
     graph=perf['runs']['graphs'];p=perf['profile']
-    values.update(headline_rate=fmt(rates[-1],0),headline_speedup=fmt(rates[-1]/baseline,1),gpu=graph['device'],kernel_ms=fmt(p['mean_kernel_gpu_ms'],1),wall_ms=fmt(p['unprofiled_mean_step_ms'],1),noise_multiplier=str(policy['noise_multiplier']),count_floor=str(policy['generated_mlp_count_floor']),workload_requests=str(graph['requests']),output_cap=str(graph['max_new_tokens']),batch_size=str(graph['batch_size']))
+    values.update(headline_rate=fmt(rates[-1],0),headline_speedup=fmt(rates[-1]/baseline,1),speedup=fmt(rates[-1]/baseline,1),gpu=graph['device'],kernel_ms=fmt(p['mean_kernel_gpu_ms'],1),wall_ms=fmt(p['unprofiled_mean_step_ms'],1),noise_multiplier=str(policy['noise_multiplier']),count_floor=str(policy['generated_mlp_count_floor']),workload_requests=str(graph['requests']),output_cap=str(graph['max_new_tokens']),batch_size=str(graph['batch_size']))
+    speed_context=r2_speed['capacity_context']
+    reasoning_benchmarks={'aime25','amc23','olympiadbench','math500','gpqa'}
+    code_benchmarks={'humaneval','mbpp'}
+    expected_benchmarks=reasoning_benchmarks|code_benchmarks
+    if set(r2_speed['benchmarks'])!=expected_benchmarks:
+        raise ValueError('R2 speed data must contain exactly the expected reasoning and code benchmarks')
+    reasoning_rates=[];code_rates=[]
+    for benchmark,record in r2_speed['benchmarks'].items():
+        assert record['max_new_tokens']==speed_context['long_output_cap']
+        assert set(record['seed_rates'])=={'42','1234','2024'}
+        expected_category='reasoning' if benchmark in reasoning_benchmarks else 'code'
+        assert record['speed_category']==expected_category
+        if record['mean_tokens_per_second'] is not None:
+            assert record['complete_seed_count']==3
+            (reasoning_rates if expected_category=='reasoning' else code_rates).append(record['mean_tokens_per_second'])
+        else:
+            assert record['complete_seed_count']<3
+    if not reasoning_rates or not code_rates:
+        raise ValueError('Both reasoning and code groups need complete R2 metrics for all three seeds')
+    values.update(r2_output_cap=str(speed_context['long_output_cap']),r2_tps_min=fmt(min(reasoning_rates),0),
+                  r2_tps_max=fmt(max(reasoning_rates),0),r2_tps_code_min=fmt(min(code_rates),0),
+                  r2_tps_code_max=fmt(max(code_rates),0),long_requests=str(speed_context['estimated_long_requests']),
+                  short_requests=str(speed_context['comparison_resident_requests']))
+    ab=memory_ab['budgets']['8g']
+    if not ab['identical_outputs'] or ab['swap_outs']['old']!=ab['swap_outs']['new'] or ab['restarts']!={'old':0,'new':0}:
+        raise ValueError('The no-overflow memory comparison must be token-identical with matching swaps and no restarts')
+    values.update(ab_requests=str(ab['requests']),ab_swaps=str(ab['swap_outs']['old']),
+                  ab_swap_old=fmt(ab['swap_seconds']['old'],2),ab_swap_new=fmt(ab['swap_seconds']['new'],2),
+                  ab_rss_old=fmt(ab['rss_growth_during_gib']['old'],3),ab_rss_new=fmt(ab['rss_growth_during_gib']['new'],3),
+                  ab_page_mib=fmt(memory_ab['page_bytes']/2**20,0))
     rows=[];detail=[];largest=[]
     for checkpoint in CHECKPOINTS:
         reports=[r for r in eq['reports'] if r['checkpoint']==checkpoint]
@@ -490,6 +521,7 @@ def main():
     template=re.sub(r'\{\{#overlap\}\}(.*?)\{\{/overlap\}\}',lambda m:m[1] if 'overlap' in perf['runs'] else '',template,flags=re.S)
     for step,item in policy['reproduction'].items():
         values[step+'_runtime']=item['runtime'];values[step+'_device']=item['device']
+    values['memory_ab_gpu_runtime']=policy['external_experiments']['memory_ab']['runtime']
     values['data_file_count']=str(len(manifest['files']))
     missing=set(re.findall(r'\{\{(\w+)\}\}',template))-values.keys()
     if missing:raise ValueError('Unfilled template fields: '+str(missing))

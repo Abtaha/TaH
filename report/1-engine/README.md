@@ -17,6 +17,10 @@ The engine runs the same algorithm with mixed-depth batches, a shared key/value 
 - **Overlap scheduling:** the next step is prepared while the GPU runs.
 - **Swap and restart:** preempted requests move to host memory, or restart from the prompt if it is full.
 
+Two memory-only changes were made after the accuracy runs. First, during the reproduction runs, cached host-memory pages kept ready for direct GPU transfers were released periodically, which stopped host RAM from growing with swapping. Then swapping was moved into one fixed host buffer allocated at start-up, so the host memory used for swapping equals the configured budget for the whole run. Neither change alters the computation. With no buffer overflow, outputs are token-identical to the previous version: 48 requests, 135 swaps, total swap time 5.17 s → 0.11 s, host-memory growth 1.534 → 0.050 GiB. When the buffer is full, the engine now decides in whole 28 MiB pages, which can change which requests restart.
+
+**Reproduce:** the A/B comparison uses `data/tmp/wp21/ab.py` (5–10 min, GPU); `./reproduce.sh memory_ab` curates the saved results (seconds, CPU) into `data/memory_ab.json`.
+
 ## Results
 
 ### Equivalence to the reference
@@ -93,6 +97,12 @@ Workload: 128 requests, up to 4096 new tokens each, at most 64 resident; timings
 
 **Reproduce:** `./reproduce.sh speed`: 18–25 min, GPU; writes `data/speed.json`. `reference` refreshes the reference row (72–85 min, GPU).
 
+**Speed at 8192 tokens.** The speed figure above uses answers of up to 4096 tokens. In the reproduction runs (chapter 2) answers may reach 8192 tokens, and there the engine generates 693–1050 tokens/s on the long-reasoning benchmarks. The main reason is memory. The key/value cache (GPU memory holding what the model has already read for each request) fits only about 15 such long requests at once instead of 64, so fewer requests share each step. Moving paused requests to CPU memory and back (swapping) costs the rest. The 20.7× speed-up was measured at 4096 tokens only; the reference was not measured at 8192.
+
+For HumanEval+/MBPP+, the engine generates 341–593 tokens/s. The code benchmarks are slower for a different reason: with the harness prompt their answers are short code without reasoning, so loading prompts and the last few unfinished requests take a larger share of the time.
+
+**Reproduce:** `./reproduce.sh r2_speed` curates the R2 job metrics (seconds, CPU) into `data/r2_speed.json`.
+
 ### Robustness
 
 | Check | Requests | Total output tokens | Result / final cache state |
@@ -120,7 +130,6 @@ Validated on an NVIDIA L40S-24Q (compute capability 8.9, driver 535, CUDA 12.8, 
 - R1 has one confirmatory reference run (2 samples per problem), whose sampling noise dominates the paired standard error.
 - Earlier exploratory runs exist outside this chapter and are not used.
 - Deviation: Engine seed 2024 was run through eval.py before the protocol runner existed (harness batch size 16 instead of 8, one engine job for both datasets); the engine backend ignores the batch size, other settings match.
-- A memory-only fix to `HostSwap._release_cached` (`tah/engine/scheduler.py`; returns cached pinned host blocks, no numerical or scheduling change) postdates R1; some R2 runs include it.
 
 ## Reproduce and data
 
@@ -140,6 +149,8 @@ Steps and data files: [scripts/README.md](scripts/README.md#data-files).
 | Fixtures | `fixtures` | `generate_fixtures` | 30–45 min / GPU + CPU preparation | `reproduction/fixtures/` |
 | Reference row | `reference` | `eval.py --backend tah` | 72–85 min / GPU | `speed.json` |
 | Speed, figure | `speed` | `engine_check` perf, profile | 18–25 min / GPU | `speed.json` |
+| Speed at long output cap | `r2_speed` | CPU curation of the R2 job metrics | seconds / CPU | `r2_speed.json` |
+| Host-swap memory A/B | `memory_ab` | `data/tmp/wp21/ab.py` A/B runs; `./reproduce.sh memory_ab` curation | 5–10 min / GPU; seconds / CPU | `memory_ab.json` |
 | Level 1 | `equivalence` | `test_gtf`; cached replay; `generated_gtf`; `engine_check` gen | 2–4 h / GPU | `equivalence.json` |
 | Long context, sampler | `diagnostics` | `longctx.py` | 11–15 min / GPU | `diagnostics.json` |
 | Level 2 | `accuracy` | `run_protocol.py`; CSV curation | 12–17 h / GPU; resumable groups; CPU import | `r1/samples.csv`, `r1/runs.json` |

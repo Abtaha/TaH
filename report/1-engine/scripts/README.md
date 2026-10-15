@@ -77,6 +77,15 @@ only the columns used by analysis and comparison. Full generated text, status
 records, configs, group commands and telemetry remain at the recorded source
 paths. See [R1.md](R1.md) for the input contract.
 
+`r2_speed` curates per-seed generated-token rates for each 8192-token R2 group
+from `data/engine/paper_protocol_seed{42,1234,2024}` into `data/r2_speed.json`.
+It uses the same generated-tokens / generation-seconds definition as the
+chapter 2 run table; it runs on CPU in seconds. `memory_ab` reads the saved old
+and new comparisons in `data/tmp/wp21/gpu/`, using `data/tmp/wp21/ab.py compare`
+to refresh the comparison JSON files when needed, and writes
+`data/memory_ab.json`. The recorded A/B experiment takes 5–10 minutes on GPU;
+curating its saved results takes seconds on CPU.
+
 ## Data files
 
 `data/` holds only what the tables are computed from. `MANIFEST.json` records
@@ -103,6 +112,10 @@ source paths.
   `MANIFEST.json` retains source paths and hashes for both compact files;
   full generations and raw run artifacts remain at those source paths.
   `analyze.py` verifies protocol settings and complete coverage.
+- `r2_speed.json`: generated-token rates for each 8192-token R2 benchmark,
+  averaged across its three seeds, plus the approximate KV-capacity comparison.
+- `memory_ab.json`: old/new host-swap counters, output identity, swap time and
+  host-memory growth for the 8 GiB and 0.5 GiB comparisons.
 
 ## Refreshing performance
 

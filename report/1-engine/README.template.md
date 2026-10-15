@@ -17,6 +17,10 @@ The engine runs the same algorithm with mixed-depth batches, a shared key/value 
 {{#overlap}}- **Overlap scheduling:** the next step is prepared while the GPU runs.
 {{/overlap}}- **Swap and restart:** preempted requests move to host memory, or restart from the prompt if it is full.
 
+Two memory-only changes were made after the accuracy runs. First, during the reproduction runs, cached host-memory pages kept ready for direct GPU transfers were released periodically, which stopped host RAM from growing with swapping. Then swapping was moved into one fixed host buffer allocated at start-up, so the host memory used for swapping equals the configured budget for the whole run. Neither change alters the computation. With no buffer overflow, outputs are token-identical to the previous version: {{ab_requests}} requests, {{ab_swaps}} swaps, total swap time {{ab_swap_old}} s → {{ab_swap_new}} s, host-memory growth {{ab_rss_old}} → {{ab_rss_new}} GiB. When the buffer is full, the engine now decides in whole {{ab_page_mib}} MiB pages, which can change which requests restart.
+
+**Reproduce:** the A/B comparison uses `data/tmp/wp21/ab.py` ({{memory_ab_gpu_runtime}}, GPU); `./reproduce.sh memory_ab` curates the saved results ({{memory_ab_runtime}}, CPU) into `data/memory_ab.json`.
+
 ## Results
 
 ### Equivalence to the reference
@@ -69,6 +73,12 @@ Workload: {{workload_requests}} requests, up to {{output_cap}} new tokens each, 
 
 **Reproduce:** `./reproduce.sh speed`: {{speed_runtime}}, {{speed_device}}; writes `data/speed.json`. `reference` refreshes the reference row ({{reference_runtime}}, {{reference_device}}).
 
+**Speed at {{r2_output_cap}} tokens.** The speed figure above uses answers of up to {{output_cap}} tokens. In the reproduction runs (chapter 2) answers may reach {{r2_output_cap}} tokens, and there the engine generates {{r2_tps_min}}–{{r2_tps_max}} tokens/s on the long-reasoning benchmarks. The main reason is memory. The key/value cache (GPU memory holding what the model has already read for each request) fits only about {{long_requests}} such long requests at once instead of {{short_requests}}, so fewer requests share each step. Moving paused requests to CPU memory and back (swapping) costs the rest. The {{speedup}}× speed-up was measured at {{output_cap}} tokens only; the reference was not measured at {{r2_output_cap}}.
+
+For HumanEval+/MBPP+, the engine generates {{r2_tps_code_min}}–{{r2_tps_code_max}} tokens/s. The code benchmarks are slower for a different reason: with the harness prompt their answers are short code without reasoning, so loading prompts and the last few unfinished requests take a larger share of the time.
+
+**Reproduce:** `./reproduce.sh r2_speed` curates the R2 job metrics (seconds, CPU) into `data/r2_speed.json`.
+
 ### Robustness
 
 {{robustness_table}}
@@ -91,7 +101,6 @@ Validated on an {{port_device}} (compute capability {{port_cc}}, driver {{port_d
 - R1 has one confirmatory reference run (2 samples per problem), whose sampling noise dominates the paired standard error.
 - Earlier exploratory runs exist outside this chapter and are not used.
 - Deviation: {{deviation}}
-- A memory-only fix to `HostSwap._release_cached` (`tah/engine/scheduler.py`; returns cached pinned host blocks, no numerical or scheduling change) postdates R1; some R2 runs include it.
 
 ## Reproduce and data
 
@@ -111,6 +120,8 @@ Steps and data files: [scripts/README.md](scripts/README.md#data-files).
 | Fixtures | `fixtures` | `generate_fixtures` | {{fixtures_runtime}} / {{fixtures_device}} | `reproduction/fixtures/` |
 | Reference row | `reference` | `eval.py --backend tah` | {{reference_runtime}} / {{reference_device}} | `speed.json` |
 | Speed, figure | `speed` | `engine_check` perf, profile | {{speed_runtime}} / {{speed_device}} | `speed.json` |
+| Speed at long output cap | `r2_speed` | CPU curation of the R2 job metrics | seconds / CPU | `r2_speed.json` |
+| Host-swap memory A/B | `memory_ab` | `data/tmp/wp21/ab.py` A/B runs; `./reproduce.sh memory_ab` curation | {{memory_ab_gpu_runtime}} / GPU; {{memory_ab_runtime}} / CPU | `memory_ab.json` |
 | Level 1 | `equivalence` | `test_gtf`; cached replay; `generated_gtf`; `engine_check` gen | {{equivalence_runtime}} / {{equivalence_device}} | `equivalence.json` |
 | Long context, sampler | `diagnostics` | `longctx.py` | {{diagnostics_runtime}} / {{diagnostics_device}} | `diagnostics.json` |
 | Level 2 | `accuracy` | `run_protocol.py`; CSV curation | {{accuracy_runtime}} / {{accuracy_device}}; CPU import | `r1/samples.csv`, `r1/runs.json` |

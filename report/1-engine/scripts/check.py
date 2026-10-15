@@ -19,7 +19,7 @@ sys.dont_write_bytecode=True
 os.environ['CUDA_VISIBLE_DEVICES']=''
 os.environ['PYTHONDONTWRITEBYTECODE']='1'
 ROOT=Path(__file__).resolve().parents[1]
-SCRATCH=ROOT.parents[1]/'data/tmp/wp24'
+SCRATCH=ROOT.parents[1]/'data/tmp/wp25/checks/1-engine'
 
 
 def snapshot():
@@ -38,7 +38,10 @@ def main():
     # Every named reproduction plan must be inspectable without GPU imports.
     for step in json.loads((ROOT/'data/method.json').read_text())['reproduction']:
         result=subprocess.run([sys.executable,str(ROOT/'scripts/reproduce.py'),step,'--dry-run'],check=True,capture_output=True,text=True)
-        assert 'Then extract' in result.stdout
+        if step in ('r2_speed','memory_ab'):
+            assert 'curate_wp25.py' in result.stdout
+        else:
+            assert 'Then extract' in result.stdout
     print('All named reproduction dry-runs: PASS')
     spec=importlib.util.spec_from_file_location('chapter_analysis',ROOT/'analyze.py')
     chapter=importlib.util.module_from_spec(spec);spec.loader.exec_module(chapter)

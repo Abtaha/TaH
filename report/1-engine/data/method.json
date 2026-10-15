@@ -2,6 +2,12 @@
   "accuracy_se_factor": 2,
   "compile_all_bucket_startup_lower_bound_seconds": 300,
   "compile_startup_note": "Recorded interrupted attempt in notes/log/WP8.md; not a completed startup measurement.",
+  "external_experiments": {
+    "memory_ab": {
+      "device": "GPU",
+      "runtime": "5–10 min"
+    }
+  },
   "confirmatory": {
     "confidence": 0.9,
     "engine_seeds": [
@@ -53,6 +59,14 @@
     "reference": {
       "device": "GPU",
       "runtime": "72–85 min"
+    },
+    "r2_speed": {
+      "device": "CPU",
+      "runtime": "seconds"
+    },
+    "memory_ab": {
+      "device": "CPU",
+      "runtime": "seconds"
     },
     "robustness": {
       "device": "GPU",
