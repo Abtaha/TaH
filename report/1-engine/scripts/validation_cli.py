@@ -51,7 +51,8 @@ def main():
     check=importlib.import_module('tah.engine.tests.engine_check')
     old_digest=check.digest
     def digest(path):
-        if str(path)=='data/engine/wp2/tolerances.json':path=os.environ['TAH_GTF_TOLERANCES']
+        if Path(path).name=='tolerances.json' and 'TAH_GTF_TOLERANCES' in os.environ:
+            path=os.environ['TAH_GTF_TOLERANCES']
         return old_digest(path)
     check.digest=digest
     check.fixture_setup=fixture_setup

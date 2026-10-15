@@ -72,7 +72,7 @@ def plan(step,out):
         sources['negative/greedy']=check('negative-greedy','gen','--checkpoint','mlp3','--compile')
         commands[-1]['expected_failure']=True
     elif step=='exact':
-        # CPU only. The tests write their reports to data/engine/wp3/cpu-pytest/.
+        # CPU only. The tests write their reports to the engine validation data directory.
         for label,test in [('exact-model','test_model.py'),('exact-probes','test_cpu_probes.py')]:
             add(label,['-m','pytest','-q','-o','addopts=','tah/engine/tests/'+test],gpu=False)
         sources.update({k:v for k,v in json.loads((SCRIPTS/'sources.json').read_text()).items() if k.startswith('exact/')})
@@ -107,6 +107,129 @@ def accuracy_inputs(out,inventory,commit):
     print(f'Imported {count} confirmatory samples in {file_count} chapter data files.')
 
 
+def reproduce_r1o(out, dry_run, gpu):
+    """Committed validation commands for the measured, frozen amended study.
+
+    The full frozen manifests and historical diagnostic are external inputs.
+    Run each capture once; strict replay failures are never retried. As in the
+    original chain, validity precedes every primary run and continuation follows
+    saved decisions. No new selection, pilots or C2 measurement is performed.
+    """
+    evidence=json.loads((DATA/'r1o.json').read_text())
+    out=out/'r1o'
+    if out==DATA or out.is_relative_to(DATA):
+        raise ValueError('Keep complete R1-O runs outside data/')
+    if not dry_run and out.exists():
+        raise ValueError('Use a fresh --output-root for R1-O; preserve existing evidence')
+    print('R1-O uses committed script/tah/validation modules.',flush=True)
+    print('Prerequisites: data/engine/oracle/wp23c/inputs/{manifest,c1-manifest,self-split}.json, checkpoint and preserved launch history. '
+          'The CPU pilot self-split is imported, not repeated. OOM/replay errors stop; use the recorded fitting sizes.',flush=True)
+    env=dict(os.environ,CUDA_VISIBLE_DEVICES=gpu,PYTHONDONTWRITEBYTECODE='1',
+             TMPDIR=str(REPO/'data/tmp/report-1-engine'),TOKENIZERS_PARALLELISM='false')
+    if not dry_run:
+        (REPO/'data/tmp/report-1-engine').mkdir(parents=True,exist_ok=True)
+        # Freeze/check experiment sources, model files and the immutable manifests.
+        # Historical inventories may also name removed diagnostics and source archives.
+        frozen=evidence['provenance']['source_hashes']
+        for name,digest in frozen.items():
+            if Path(name).parts[0] not in {'script', 'tah', 'models'} or name in evidence['provenance']['unavailable_historical_sources']:
+                continue
+            path=REPO/name
+            h=hashlib.sha256()
+            with path.open('rb') as stream:
+                for chunk in iter(lambda:stream.read(1024*1024),b''):h.update(chunk)
+            if h.hexdigest()!=digest:raise ValueError('Changed frozen R1-O input: '+name)
+        inputs=json.loads((DATA/'MANIFEST.json').read_text())['files']['r1o.json']['sources']
+        for entry in inputs:
+            if entry['source_path'].startswith('data/engine/oracle/wp23c/inputs/'):
+                actual=hashlib.sha256((REPO/entry['source_path']).read_bytes()).hexdigest()
+                if actual!=entry['source_sha256']:
+                    raise ValueError('Changed frozen R1-O manifest input: '+entry['source_path'])
+        out.mkdir(parents=True)
+        (out/'source.sha256').write_text(''.join(f'{digest}  {name}\n' for name,digest in sorted(frozen.items())))
+    def run(label,module,args,cpu=False):
+        command=[str(PY),'-m','script.tah.validation.'+module,*map(str,args)]
+        print(shlex.join(command),flush=True)
+        if not dry_run:
+            with (out/(label+'.log')).open('w') as stream:
+                subprocess.run(command,cwd=REPO,env=dict(env,CUDA_VISIBLE_DEVICES='' if cpu else gpu),
+                               stdout=stream,stderr=subprocess.STDOUT,check=True)
+    model='models/TaH-plus-1.7B';config='script/tah/recipes/qwen3_1.7/eval_tah.yaml'
+    manifest='data/engine/oracle/wp23c/inputs/manifest.json';cmanifest='data/engine/oracle/wp23c/inputs/c1-manifest.json'
+    def cap(label,impl,subset,dest,*flags):
+        run(label,'capture',[impl,'--manifest',manifest,'--model',model,'--eval-config',config,
+            '--buffer-dir',REPO/'data/tmp/report-1-engine/buffer','--buffer-gb','24','--subset',subset,
+            *(['--kv-capacity','148000'] if impl=='engine' else []),*flags,'--out',dest])
+    s=out/'o1/stage1';v=s/'oracle-fp64-c128';v32=s/'validity-fp32-c256';vr=s/'validity-reference'
+    cap('validity-oracle','reference','validity',v,'--dtype','fp64','--layout','chunk','--chunk','128','--mode','free')
+    cap('validity-fp32','reference','validity',v32,'--dtype','fp32','--layout','chunk','--chunk','256','--mode','forced','--target',v)
+    cap('validity-reference','reference','validity',vr,'--mode','forced','--target',v)
+    print('Validity gate: require all three fp32-vs-fp64 errors <= reference error /20, >=20 sequences and >=20000 positions.',flush=True)
+    if not dry_run:
+        sys.path.insert(0,str(REPO))
+        from types import SimpleNamespace
+        from script.tah.validation.analyze import validity
+        m=json.loads((REPO/manifest).read_text())
+        vocab=json.loads((REPO/model/'config.json').read_text())['vocab_size']
+        val=validity(SimpleNamespace(validity_oracle=v,validity_fp32=v32,validity_reference=vr),vocab,
+                     {s['id']:s['dataset'] for s in m['sequences']})
+        dump(out/'validity.json',val)
+        if not val['status'].startswith('PASS'):raise ValueError('Invalid oracle arithmetic: stop entire R1-O study')
+    def oracle(stage):
+        directory=out/f'o1/stage{stage}';target=directory/'oracle-fp32-c256'
+        cap(f'oracle-{stage}','reference',f'stage{stage}',target,'--dtype','fp32','--layout','chunk','--chunk','256','--mode','free')
+        if not dry_run:(directory/'oracle-fp32.path').write_text(str(target)+'\n')
+        return directory,target
+    s,a=oracle(1)
+    for mode in ('forced','free'):
+        for impl,name in (('reference','ref'),('engine','engine')):
+            flags=['--mode',mode]+(['--target',a] if mode=='forced' else [])
+            if impl=='engine':flags+=['--block','32','--max-batch-size','32']
+            cap(name+'-'+mode,impl,'stage1',s/(name+'-'+mode),*flags)
+    cap('ref-b1','reference','b1',s/'ref-b1','--batch','1','--mode','forced','--target',a)
+    report=s/'analysis/r1o1.json'
+    run('o1-means','analyze',['--manifest',manifest,'--oracle',a,'--reference',s/'ref-forced','--engine',s/'engine-forced',
+        '--reference-free',s/'ref-free','--engine-free',s/'engine-free','--reference-b1',s/'ref-b1',
+        '--validity-oracle',v,'--validity-fp32',v32,'--validity-reference',vr,'--output',s/'analysis'],True)
+    cap('engine-free-reordered','engine','stage1',s/'engine-free-reordered','--block','64','--max-batch-size','32',
+        '--sequence-order','reverse','--mode','free')
+    for label,candidate,comparator,flags in [('near-tie',s/'engine-free',s/'ref-free',['--alpha','.025']),
+                                          ('free-composition',s/'engine-free-reordered',s/'engine-free',[])]:
+        run(label,'near_tie',['--oracle',a,'--engine',candidate,'--reference',comparator,*flags,'--output',out/f'o1/{label}.json'],True)
+    run('o1-look1','paired_look',['--root',out,'--manifest',manifest,'--look','1'],True)
+    def c1(stage):
+        directory=out/f'c1/stage{stage}'
+        for impl,name,flags in [('engine','engine',[]),('reference','reference',[]),('oracle','oracle-b4',['--oracle-batch','4'])]:
+            run(f'c1-{stage}-{impl}','coupled_run',['run',impl,'--manifest',cmanifest,'--model',model,'--eval-config',config,
+                '--max-new-tokens','512','--subset',f'stage{stage}',*flags,'--out',directory/name])
+        if not dry_run:(directory/'oracle.path').write_text(str(directory/'oracle-b4')+'\n')
+        run(f'c1-look{stage}','short_c1',['analyze','--manifest',cmanifest,'--root',out/'c1','--look',str(stage),'--validity-report',report],True)
+    c1(1)
+    if dry_run:
+        actions=dict(forced=False,free=True)
+        print('Dry-run shows observed continuation: forced stopped; exactly +136 free sequences; C1 stopped. '
+              'Execution reads the newly saved look decisions.',flush=True)
+    else:
+        look=json.loads((out/'o1/look1.json').read_text())
+        actions={arm:look[arm+'_next_action']=='continue_fixed_136' for arm in ('forced','free')}
+    if any(actions.values()):
+        s,a=oracle(2)
+        for mode in ('forced','free'):
+            if not actions[mode]:continue
+            for impl,name in (('reference','ref'),('engine','engine')):
+                flags=['--mode',mode]+(['--target',a] if mode=='forced' else [])
+                if impl=='engine':flags+=['--block','34','--max-batch-size','32']
+                cap(f'{name}-{mode}-stage2',impl,'stage2',s/(name+'-'+mode),*flags)
+        run('o1-look2','paired_look',['--root',out,'--manifest',manifest,'--look','2'],True)
+    if not dry_run and json.loads((out/'c1/look1.json').read_text())['next_action']=='continue_fixed_512':c1(2)
+    command=[str(PY),str(SCRIPTS/'curate_r1o.py'),'--source-root',str(out)]
+    print(shlex.join(command),flush=True)
+    print('Then extract R1-O aggregates, update data/MANIFEST.json, and run analyze.py.',flush=True)
+    if not dry_run:
+        subprocess.run(command,cwd=REPO,env=dict(env,CUDA_VISIBLE_DEVICES=''),check=True)
+        subprocess.run([str(PY),str(ROOT/'analyze.py')],cwd=REPO,env=dict(env,CUDA_VISIBLE_DEVICES=''),check=True)
+
+
 def main():
     policy=json.loads((DATA/'method.json').read_text())['reproduction']
     parser=argparse.ArgumentParser(description=__doc__)
@@ -125,13 +248,17 @@ def main():
             print(f"{name}: {item['runtime']}; {item['device']}; {output}")
         print('Use STEP --dry-run for exact commands; run fixtures before equivalence/negative. No work executed.')
         return
+    if args.step=='r1o':
+        out=REPO/'data/tmp/report-1-engine/reproduction' if args.output_root==ROOT/'reproduction' else args.output_root.resolve()
+        reproduce_r1o(out,args.dry_run,args.gpu)
+        return
     if args.step in ('r2_speed', 'memory_ab'):
-        command=[str(PY),SCRIPTS/'curate_wp25.py',args.step]
+        command=[str(PY),SCRIPTS/'curate_r2_speed_memory.py',args.step]
         print(shlex.join(map(str,command)),flush=True)
         if args.step=='r2_speed':
             print('Reads R2 metrics in data/engine/paper_protocol_seed{42,1234,2024}; then analyze.py refreshes the report.',flush=True)
         else:
-            print('Reads the saved old/new runs in data/tmp/wp21/gpu/, invokes data/tmp/wp21/ab.py compare, then analyze.py refreshes the report.',flush=True)
+            print('Reads the saved old/new runs and comparisons in data/engine/memory_ab/; analyze.py refreshes the report.',flush=True)
         if args.dry_run:return
         env=dict(os.environ,CUDA_VISIBLE_DEVICES='',PYTHONDONTWRITEBYTECODE='1')
         subprocess.run(list(map(str,command)),cwd=REPO,env=env,check=True)

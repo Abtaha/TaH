@@ -1,6 +1,6 @@
 {
   "archive_git_commit": "77908f740cad379186bfef41b5ef2041b271aab0",
-  "archived_utc": "2026-10-15T04:48:20+00:00",
+  "archived_utc": "2026-10-15T16:42:58+00:00",
   "checkpoints": {
     "label3": {
       "base_config": {
@@ -1308,37 +1308,37 @@
         {
           "source_bytes": 1322,
           "source_mtime_utc": "2026-10-15T04:27:58.096583+00:00",
-          "source_path": "data/tmp/wp21/gpu/compare_05g.json",
+          "source_path": "data/engine/memory_ab/compare_05g.json",
           "source_sha256": "53212f68f1944d05cafd0e2d9500d33d3d20a61a7ea870e1835ed6a867b9b2d2"
         },
         {
           "source_bytes": 1021,
           "source_mtime_utc": "2026-10-15T04:27:58.096583+00:00",
-          "source_path": "data/tmp/wp21/gpu/compare_8g.json",
+          "source_path": "data/engine/memory_ab/compare_8g.json",
           "source_sha256": "60b1db8feeeb4ce6c82c4eccdaf99f10bf144c683c0faac6c0a6cf05039aaefa"
         },
         {
           "source_bytes": 982649,
           "source_mtime_utc": "2026-10-15T03:32:39.566953+00:00",
-          "source_path": "data/tmp/wp21/gpu/new-0.5g.json",
+          "source_path": "data/engine/memory_ab/new-0.5g.json",
           "source_sha256": "010b6bd57bffefa6d6cc3e60de75e23d8278438d9e3a650ca791a82a3dd523c6"
         },
         {
           "source_bytes": 987831,
           "source_mtime_utc": "2026-10-15T03:31:04.923657+00:00",
-          "source_path": "data/tmp/wp21/gpu/new-8g.json",
+          "source_path": "data/engine/memory_ab/new-8g.json",
           "source_sha256": "e9c3ff512586c774b2666f01af28df8ec0bc593a088af9564bd00ff791111a04"
         },
         {
           "source_bytes": 985040,
           "source_mtime_utc": "2026-10-15T03:25:40.678300+00:00",
-          "source_path": "data/tmp/wp21/gpu/old-0.5g.json",
+          "source_path": "data/engine/memory_ab/old-0.5g.json",
           "source_sha256": "190c5030e53774bbb6d3206e4bb10a9f0965b61cd90bc5bcfa52cac21d508f73"
         },
         {
           "source_bytes": 987737,
           "source_mtime_utc": "2026-10-15T03:24:12.340067+00:00",
-          "source_path": "data/tmp/wp21/gpu/old-8g.json",
+          "source_path": "data/engine/memory_ab/old-8g.json",
           "source_sha256": "60737aea2bdc12bdda76638c1a884d965e24b8eb2c03a25bc2179373227c0c69"
         }
       ],
@@ -1349,14 +1349,14 @@
       ]
     },
     "method.json": {
-      "bytes": 1862,
+      "bytes": 2020,
       "encoding": "declared policy",
-      "purpose": "Analysis policy and estimated reproduction runtimes; not measurements.",
-      "sha256": "e1ec3de496de94aa5edafeead242e84c0a57b249901f426e8f4209d735f8035f",
-      "source_bytes": 1862,
+      "purpose": "Declared analysis policy and reproduction runtimes; r1o runtime derived from r1o.json saved block times.",
+      "sha256": "32efdb62fe3f0a893e6e5b423925d17d749ef2b4e9b345d3bfdcb67abee1e021",
+      "source_bytes": 2020,
       "source_mtime_utc": "2026-10-15T04:29:32.267156+00:00",
       "source_path": "report/1-engine/data/method.json",
-      "source_sha256": "e1ec3de496de94aa5edafeead242e84c0a57b249901f426e8f4209d735f8035f",
+      "source_sha256": "32efdb62fe3f0a893e6e5b423925d17d749ef2b4e9b345d3bfdcb67abee1e021",
       "top_level_keys_or_columns": [
         "accuracy_se_factor",
         "compile_all_bucket_startup_lower_bound_seconds",
@@ -2057,6 +2057,600 @@
         "pass_stat_tokens",
         "mean_passes_per_token",
         "fraction_tokens_at_least_2_passes"
+      ]
+    },
+    "r1o.json": {
+      "bytes": 49177,
+      "encoding": "curated JSON",
+      "purpose": "Amended confirmatory R1-O: validity, forced means/bias, both tail looks, descriptive maxima, C1, diagnostics, block timings and provenance; no raw arrays",
+      "sha256": "975c304aa751626202ba11b0b37539b83a2e1c4bbb6e5b2dffdeb4d5d9ea98d4",
+      "sources": [
+        {
+          "source_bytes": 895,
+          "source_path": "data/engine/oracle/wp23b/replay-fix.json",
+          "source_sha256": "f0c245d2223478a4cba9f73a72c614dc0208c288cf5ae796adefa1a8d7c5cd7c"
+        },
+        {
+          "source_bytes": 9747,
+          "source_path": "data/engine/oracle/wp23b/source.sha256",
+          "source_sha256": "53a3467d4166a16b3514fa94d1b6bb5e9c199aabb5d88cc11a4552d522f86393"
+        },
+        {
+          "source_bytes": 193349,
+          "source_path": "data/engine/oracle/wp23c/c1/look1.json",
+          "source_sha256": "fc4563c0b4e9439fdc2aa3b429a7259cd37544dc22e25f18bf6472254fc7f053"
+        },
+        {
+          "source_bytes": 86214,
+          "source_path": "data/engine/oracle/wp23c/c1/stage1/engine/run.json",
+          "source_sha256": "021ae4501d332b6d41cec4fce87f023d5b7b922ac16d9fdc2c3dec60a57dac1b"
+        },
+        {
+          "source_bytes": 84448,
+          "source_path": "data/engine/oracle/wp23c/c1/stage1/oracle-b4/run.json",
+          "source_sha256": "0cca759594ef8e61b3650f0edda05c3ce498da82700b26951e786e7a942f91bf"
+        },
+        {
+          "source_bytes": 70536,
+          "source_path": "data/engine/oracle/wp23c/c1/stage1/reference/run.json",
+          "source_sha256": "908f36c2b3a4ad0dbc8231ece7d21c5a2d39cc296b4e885b88facd2fdd8cee40"
+        },
+        {
+          "source_bytes": 2232799,
+          "source_path": "data/engine/oracle/wp23c/inputs/c1-manifest.json",
+          "source_sha256": "509ea4b88e371ae0ec96bbe1437a26be3013713128cb93a56f02016bc73b3ba1"
+        },
+        {
+          "source_bytes": 2988982,
+          "source_path": "data/engine/oracle/wp23c/inputs/manifest.json",
+          "source_sha256": "375a22fe6ff3ef56ae42fb4629af3ab6cb35e5e84e00a7306a26186716c59bf5"
+        },
+        {
+          "source_bytes": 628,
+          "source_path": "data/engine/oracle/wp23c/inputs/self-split.json",
+          "source_sha256": "02973940a39dac210eac30432e4e7aed9d9df3a7946bc7b1b98888b541af488e"
+        },
+        {
+          "source_bytes": 580,
+          "source_path": "data/engine/oracle/wp23c/kvcap-fix.json",
+          "source_sha256": "828ecf8e102b4e7fc2df7098935c97160c3e9e1e815798d1236ebba2fe4de845"
+        },
+        {
+          "source_bytes": 352,
+          "source_path": "data/engine/oracle/wp23c/logs/chain.status",
+          "source_sha256": "d07ef0c65dfd4fd60cdcdb54980c9fe083fc9f937b1ea315d9326ca4e9713385"
+        },
+        {
+          "source_bytes": 4364,
+          "source_path": "data/engine/oracle/wp23c/logs/eng-forced.kvcap-fail.log",
+          "source_sha256": "b256d11fdce562d627f93555a5335a495e5053a5ab79d4243f2c5e0ae8913665"
+        },
+        {
+          "source_bytes": 2306,
+          "source_path": "data/engine/oracle/wp23c/o1/free-composition.json",
+          "source_sha256": "b55dea2747749cbd60460c813539ef02d7d442e87457e1ea0b3eb0e93d85d140"
+        },
+        {
+          "source_bytes": 3202,
+          "source_path": "data/engine/oracle/wp23c/o1/look1.json",
+          "source_sha256": "2fd0c1d2bf270a30a36e69d1444e60884d8c3b4856b96a465c800825ee95f3dd"
+        },
+        {
+          "source_bytes": 3552,
+          "source_path": "data/engine/oracle/wp23c/o1/look2.json",
+          "source_sha256": "4c5b90d058bd5a387224b2dfb60e0425f6f97fafd61285c5ad82e38c98ddb2f6"
+        },
+        {
+          "source_bytes": 2301,
+          "source_path": "data/engine/oracle/wp23c/o1/near-tie.json",
+          "source_sha256": "847d7d495f743ded14a2cadfab0590a6e5d4a4cb5c90341d188355754d4236a0"
+        },
+        {
+          "source_bytes": 14978,
+          "source_path": "data/engine/oracle/wp23c/o1/stage1/analysis/r1o1.json",
+          "source_sha256": "48867ee937f645f27dc476fbca03f40f708990ed92822cd2029a8425e1bee40a"
+        },
+        {
+          "source_bytes": 16632,
+          "source_path": "data/engine/oracle/wp23c/o1/stage1/engine-forced/run.json",
+          "source_sha256": "c55535f3c4fa778f67e120fe0adb9eb7d91061dbcdb1954403324332d4423d79"
+        },
+        {
+          "source_bytes": 15616,
+          "source_path": "data/engine/oracle/wp23c/o1/stage1/engine-free-reordered/run.json",
+          "source_sha256": "4a0ffe609856d9d2ffa45201e38c7ea3eab7e8b36b9b77d8f34420e1f2847f30"
+        },
+        {
+          "source_bytes": 16600,
+          "source_path": "data/engine/oracle/wp23c/o1/stage1/engine-free/run.json",
+          "source_sha256": "be514c448de883bd81d441a42b40710dddf5e79732f685a166df0519148bd1b5"
+        },
+        {
+          "source_bytes": 25291,
+          "source_path": "data/engine/oracle/wp23c/o1/stage1/oracle-fp32-c256/run.json",
+          "source_sha256": "3eb06a773b0656eb5fa8289f9e1f7b92d2d30a68fce48a47ce53134efae27e84"
+        },
+        {
+          "source_bytes": 8981,
+          "source_path": "data/engine/oracle/wp23c/o1/stage1/oracle-fp64-c128/run.json",
+          "source_sha256": "b4544bdc28659726496ecae9e652d3a5bf6bb30f1f2b3a57c77ea4913c85afcf"
+        },
+        {
+          "source_bytes": 2765,
+          "source_path": "data/engine/oracle/wp23c/o1/stage1/ref-b1/run.json",
+          "source_sha256": "f4cc49ea2d8e8f3baa07abee01b33904eb255d84b408aa1af52a0001668954bf"
+        },
+        {
+          "source_bytes": 15947,
+          "source_path": "data/engine/oracle/wp23c/o1/stage1/ref-forced/run.json",
+          "source_sha256": "57fa0e9091ed3d8caf9d4dc5e76d20f099625e1fbf72eacb610036cb68d98b17"
+        },
+        {
+          "source_bytes": 15894,
+          "source_path": "data/engine/oracle/wp23c/o1/stage1/ref-free/run.json",
+          "source_sha256": "2a4c0554dd1f987611cfdcf65662ab0cf5685e1f343e031b9b5902a6858fdd4c"
+        },
+        {
+          "source_bytes": 8974,
+          "source_path": "data/engine/oracle/wp23c/o1/stage1/validity-fp32-c256/run.json",
+          "source_sha256": "93fd020f96ab21bc4244148038cb771908f924ddc1a5805257c9345b1d3de7aa"
+        },
+        {
+          "source_bytes": 6132,
+          "source_path": "data/engine/oracle/wp23c/o1/stage1/validity-reference/run.json",
+          "source_sha256": "b0ac493c65b50282efe87dd85d1d371cd70d9a1a20112fe4cee8b07ab93c836c"
+        },
+        {
+          "source_bytes": 33650,
+          "source_path": "data/engine/oracle/wp23c/o1/stage2/engine-free/run.json",
+          "source_sha256": "41493e9cb965cd30ff148426bb3bc16a5ce6ddc7b1a5ee3a8cb9cab438e1b4d2"
+        },
+        {
+          "source_bytes": 52501,
+          "source_path": "data/engine/oracle/wp23c/o1/stage2/oracle-fp32-c256/run.json",
+          "source_sha256": "d1a954c90c2b8025d621edfae63ebf022fe7f7914c67e1326751af4ddfe1b301"
+        },
+        {
+          "source_bytes": 32482,
+          "source_path": "data/engine/oracle/wp23c/o1/stage2/ref-free/run.json",
+          "source_sha256": "2b036abc87327cacf3f4225f29a3a826fc504ef45e4cf2c4e619643a58c7f450"
+        },
+        {
+          "source_bytes": 11050,
+          "source_path": "data/engine/oracle/wp23c/source.before-kvcap.sha256",
+          "source_sha256": "82f07ed51515f948f423889a8dc4a92360f57120078fb9962ae6d1731d548047"
+        },
+        {
+          "source_bytes": 11050,
+          "source_path": "data/engine/oracle/wp23c/source.sha256",
+          "source_sha256": "3e482afe6a31bd784fa6e0b41916f0f315cd6adc41facdcfdec91cdb78e0b907"
+        },
+        {
+          "source_bytes": 16789,
+          "source_path": "report/PROTOCOL.md",
+          "source_sha256": "35542bdfd00715593fc8d9fe03dc3a9e04c4cd548de701c041af2acc00c7906c"
+        },
+        {
+          "source_bytes": 520,
+          "source_path": "script/tah/recipes/qwen3_1.7/eval_tah.yaml",
+          "source_sha256": "b1a0bc525a597fecc89db3230e4b03042eb9c2aad90022ef977ad35243363b24"
+        },
+        {
+          "source_bytes": 188,
+          "source_path": "script/tah/validation/__init__.py",
+          "source_sha256": "f73638cb96d63fa501808bfd2ece7b0d61ab79330b9b9967f526c05fca0cdbe7"
+        },
+        {
+          "source_bytes": 20180,
+          "source_path": "script/tah/validation/analyze.py",
+          "source_sha256": "0e7ec048f6549caf6b990f636f4cf49a6124abfc9b4df1e9df53898a7493a663"
+        },
+        {
+          "source_bytes": 17044,
+          "source_path": "script/tah/validation/capture.py",
+          "source_sha256": "cbb101097116210e9ab0c9618631e7a2dc2d04ae224bf46c86046af9a00149f9"
+        },
+        {
+          "source_bytes": 12783,
+          "source_path": "script/tah/validation/common.py",
+          "source_sha256": "3d600b0368107aa3a5299bdb2c268bcac39ddacaf1b326187247058c0d490e53"
+        },
+        {
+          "source_bytes": 15359,
+          "source_path": "script/tah/validation/coupled_analyze.py",
+          "source_sha256": "5a1e6e45810ce33dea709ff017c0d1fd348fa8ce59b40db11ebe8a73e7564b0b"
+        },
+        {
+          "source_bytes": 20101,
+          "source_path": "script/tah/validation/coupled_run.py",
+          "source_sha256": "e0f9d89476d906e151e21da93698221c58bf30e108b9ef9ba24e94e565804e83"
+        },
+        {
+          "source_bytes": 3612,
+          "source_path": "script/tah/validation/coupling.py",
+          "source_sha256": "3e4a278940a40debd26a8c8f90a80146b7dbdcae7e4ded60f896d7d6434fcb24"
+        },
+        {
+          "source_bytes": 10121,
+          "source_path": "script/tah/validation/engine_run.py",
+          "source_sha256": "69850d1742b8bc16631f257c426b52ea6dc37ccbc200f20cc467c7aef68565ef"
+        },
+        {
+          "source_bytes": 3724,
+          "source_path": "script/tah/validation/fp64_attention.py",
+          "source_sha256": "06b30f3d49b6c83940acdd7a294e5ecd5688c615c25d148f5a2ec1db9e0ec127"
+        },
+        {
+          "source_bytes": 12116,
+          "source_path": "script/tah/validation/near_tie.py",
+          "source_sha256": "b771a82474528a93032bdad723cb389ee99124c4f8662f414d1c814871eee289"
+        },
+        {
+          "source_bytes": 7675,
+          "source_path": "script/tah/validation/paired_look.py",
+          "source_sha256": "2a91a0f36210a7e8f13b4df0f92aa6472145dc409a1ad4a2af5fcefc487cdfee"
+        },
+        {
+          "source_bytes": 7668,
+          "source_path": "script/tah/validation/reference_run.py",
+          "source_sha256": "19167672050654ffef3305265fba2fbdf5d4cfbd4a1a8d0265f41a4da4edac70"
+        },
+        {
+          "source_bytes": 8585,
+          "source_path": "script/tah/validation/select_sequences.py",
+          "source_sha256": "8904169d27f8e06cfad985f357d2301ed1c9aa1318fc80970c621a33076e8729"
+        },
+        {
+          "source_bytes": 11980,
+          "source_path": "script/tah/validation/short_c1.py",
+          "source_sha256": "3aad1a3e6ec808292dce38a55d5baede534ccf10503aeab5872ff73eaf250a5c"
+        },
+        {
+          "source_bytes": 19060,
+          "source_path": "script/tah/validation/tests/test_coupled.py",
+          "source_sha256": "d9fb59f467eb5ca664f5f8be371f8dec14df539d3efadb0986f979b456350800"
+        },
+        {
+          "source_bytes": 8809,
+          "source_path": "script/tah/validation/tests/test_fp64_attention.py",
+          "source_sha256": "2531eccc19ba980bee4870248bf7252b11f61cc139f7dcbc947a8ff7cfe8b84c"
+        },
+        {
+          "source_bytes": 23482,
+          "source_path": "script/tah/validation/tests/test_short_design.py",
+          "source_sha256": "e6f0ba004d92518ccc8a87422346b431a0049df36e9f0ef424ba279047f88052"
+        },
+        {
+          "source_bytes": 17035,
+          "source_path": "script/tah/validation/tests/test_validation.py",
+          "source_sha256": "acd74edd8eba7609c583363c2d653b7d653a759139c3f30072afab69cc9794f2"
+        },
+        {
+          "source_bytes": 4628,
+          "source_path": "tah/engine/__init__.py",
+          "source_sha256": "e80377bec1a1d80c41c9ab6963758f3f316c8ba162b425433c514496d8b3362e"
+        },
+        {
+          "source_bytes": 15548,
+          "source_path": "tah/engine/attention.py",
+          "source_sha256": "e523668dfd98cc9e29bad9fdc601f943c2d19971429c045312c16b69d413a66a"
+        },
+        {
+          "source_bytes": 4110,
+          "source_path": "tah/engine/attention_kernels.py",
+          "source_sha256": "aec7cdfe47e9609bc390f7cef6fa214b28f1e2d780495fdeefe17705c504924a"
+        },
+        {
+          "source_bytes": 8150,
+          "source_path": "tah/engine/cached_model.py",
+          "source_sha256": "3752d4135d592f3199fc733f7027c9eaca9984387d95dedbcd818993f85e41cb"
+        },
+        {
+          "source_bytes": 7462,
+          "source_path": "tah/engine/compiled.py",
+          "source_sha256": "420dafd5edc012e3556ec07191486c3958e0927040c6bf3f455f09001fc71237"
+        },
+        {
+          "source_bytes": 4332,
+          "source_path": "tah/engine/config.py",
+          "source_sha256": "8969a8c08e14cae835a758131c7ffab2cebae5a74f6c368fca3586d7b8063dfe"
+        },
+        {
+          "source_bytes": 5205,
+          "source_path": "tah/engine/decider.py",
+          "source_sha256": "7f8ff43de73ced9947350749056b0417507fc0b557c73aff613dfd78624e5015"
+        },
+        {
+          "source_bytes": 51627,
+          "source_path": "tah/engine/engine.py",
+          "source_sha256": "3636f54199747f3657af4d387640e0b050f82be098008057117be49580a81fd8"
+        },
+        {
+          "source_bytes": 3016,
+          "source_path": "tah/engine/fixtures.py",
+          "source_sha256": "fbeb40c5bac6882f340048abb40ce852e38d3b3f3d3ce096f347806e9de65cc0"
+        },
+        {
+          "source_bytes": 29699,
+          "source_path": "tah/engine/generate_fixtures.py",
+          "source_sha256": "2151cebef592ca29531682678e5ab34cf0564d46ad26512c6259d31e18a6f3e3"
+        },
+        {
+          "source_bytes": 5832,
+          "source_path": "tah/engine/graphs.py",
+          "source_sha256": "7165d25edbe313140efe1efcbeaf485e4b01ec0d341118c94b81d99981fd8c4b"
+        },
+        {
+          "source_bytes": 3001,
+          "source_path": "tah/engine/host_arena.py",
+          "source_sha256": "48240d3924e2cd03256f5c56695399783f9f330b2176f7f7f37576959132b149"
+        },
+        {
+          "source_bytes": 14851,
+          "source_path": "tah/engine/kv_cache.py",
+          "source_sha256": "8f243576dd44614b469f47306a80c3e5579fff109f18444bd432daf24352d817"
+        },
+        {
+          "source_bytes": 2587,
+          "source_path": "tah/engine/layers.py",
+          "source_sha256": "e009fd0db1b52e8170562356d3e80dc23e7c9e76a9b62c1dbdabb1944f6f46db"
+        },
+        {
+          "source_bytes": 11071,
+          "source_path": "tah/engine/model.py",
+          "source_sha256": "54251a5342b6369e60f2799dcdc63a67dd5376698b432a2c9be186b2c0d944ef"
+        },
+        {
+          "source_bytes": 8997,
+          "source_path": "tah/engine/parity.py",
+          "source_sha256": "5d8a9246d3dc49c7c1adb5d526f114918185caf1c4390c0bd924a28a2432e889"
+        },
+        {
+          "source_bytes": 14537,
+          "source_path": "tah/engine/reference_capture.py",
+          "source_sha256": "88096ce03a0e51e2b4abbdbc626d3fcbdedf9e633786ea43d584aafa5dd841c0"
+        },
+        {
+          "source_bytes": 6135,
+          "source_path": "tah/engine/rope.py",
+          "source_sha256": "3a03d19de657938c048ecbfe2044e2d3f1fa36dae891a087bc7986b7f2529aa3"
+        },
+        {
+          "source_bytes": 16840,
+          "source_path": "tah/engine/sampling.py",
+          "source_sha256": "a4ca91b6bcf7b3e78b9df845ac6a650875350c682ff40d4b582f553af2a95237"
+        },
+        {
+          "source_bytes": 10410,
+          "source_path": "tah/engine/scheduler.py",
+          "source_sha256": "173e875b5b29428e460afd9afd2daef028c89bae7580da7f7129990003fb0159"
+        },
+        {
+          "source_bytes": 299,
+          "source_path": "tah/engine/tensors.py",
+          "source_sha256": "2f4ae9617d5fe13659bc988b08ef22014c1a53ff91c5c3c50ebbbffce151ab11"
+        },
+        {
+          "source_bytes": 10092,
+          "source_path": "tah/engine/tests/attention_check.py",
+          "source_sha256": "0554d802c3bb0123d4c6a74349a0d295c6b75eeb5e9f44edaead7dc4f07bb299"
+        },
+        {
+          "source_bytes": 43746,
+          "source_path": "tah/engine/tests/engine_check.py",
+          "source_sha256": "94564ba78b190fd81fcddc7aa6a3167bcad4a65aba0a284b431833821332d129"
+        },
+        {
+          "source_bytes": 13067,
+          "source_path": "tah/engine/tests/generated_gtf.py",
+          "source_sha256": "a5e7aca1a6f8b3a1a605f5aaec7d28b850d1e38af9d5ccab82bdc99cb1b655d5"
+        },
+        {
+          "source_bytes": 7335,
+          "source_path": "tah/engine/tests/kernel_check.py",
+          "source_sha256": "ba4de1dde9518579fa79f6e3c50841dd0c36fc10706a2f61371f51e6850ec096"
+        },
+        {
+          "source_bytes": 5664,
+          "source_path": "tah/engine/tests/metadata_check.py",
+          "source_sha256": "35f0b8a319e2907b738bc2ed9ab02144c1386a0ab50d59aed09d27cc60b78bcd"
+        },
+        {
+          "source_bytes": 2649,
+          "source_path": "tah/engine/tests/overlap_replay.py",
+          "source_sha256": "fab221f3c3c3ef1fd49a7aed46307caf36bc8badebec6816b10e84f7686d4261"
+        },
+        {
+          "source_bytes": 5156,
+          "source_path": "tah/engine/tests/sampling_check.py",
+          "source_sha256": "c9d259e5efc5e5a8245323738ddbc1cb19c144b6b926ab970b794119db09bc67"
+        },
+        {
+          "source_bytes": 5433,
+          "source_path": "tah/engine/tests/test_attention.py",
+          "source_sha256": "22c124b65603630e900128621068445cc51f5ce73be45ae1f8ab6e62b21f1134"
+        },
+        {
+          "source_bytes": 9823,
+          "source_path": "tah/engine/tests/test_attention_gpu.py",
+          "source_sha256": "c4b1d2c8fc17fa46ea3f60abfe5a3d4722a7725736ee3b161e845db70972274e"
+        },
+        {
+          "source_bytes": 5728,
+          "source_path": "tah/engine/tests/test_cached_gtf.py",
+          "source_sha256": "08ecced25e583da839ce85fa7792ec4b4cd77d5b8ab5f44ac4e9cb6f4d22b889"
+        },
+        {
+          "source_bytes": 8211,
+          "source_path": "tah/engine/tests/test_cached_model.py",
+          "source_sha256": "f9a243fbe442b4a1a245650fe5ec858acae05e0b93936d9ba538775cc6db5676"
+        },
+        {
+          "source_bytes": 2641,
+          "source_path": "tah/engine/tests/test_cpu_probes.py",
+          "source_sha256": "aafe413410f1c34dba0e293b3da07e521db3a7c2da114c29b9bd8e859133f1e4"
+        },
+        {
+          "source_bytes": 23403,
+          "source_path": "tah/engine/tests/test_engine.py",
+          "source_sha256": "42921a15176971802e1bcec4434f8dd404625295ef2f029d83c4e085bf83c757"
+        },
+        {
+          "source_bytes": 21615,
+          "source_path": "tah/engine/tests/test_engine_gpu.py",
+          "source_sha256": "83ce155e346358358e430b3ea05af3e18c943e75f1a05a1b9f83abbf92d598cd"
+        },
+        {
+          "source_bytes": 5851,
+          "source_path": "tah/engine/tests/test_eval_integration.py",
+          "source_sha256": "00f88a0150ec808a554fc2ce5de96a3a070d2d5301d5f26b720c7e73b543458b"
+        },
+        {
+          "source_bytes": 6519,
+          "source_path": "tah/engine/tests/test_fixtures.py",
+          "source_sha256": "032a5ae934c7d32f462b7fa8867bb22cad2b82a19a44352802fc1f1104a6529e"
+        },
+        {
+          "source_bytes": 6461,
+          "source_path": "tah/engine/tests/test_gtf.py",
+          "source_sha256": "1f9e14b0ecafdeebb4b69313853f78c71e5a0116fead95c0817ae660c6b31318"
+        },
+        {
+          "source_bytes": 10405,
+          "source_path": "tah/engine/tests/test_host_swap.py",
+          "source_sha256": "0ee40e4a7dbcacc577a474d27329dbab0f15c721684ec8209dfc0b3e432ebf48"
+        },
+        {
+          "source_bytes": 4857,
+          "source_path": "tah/engine/tests/test_kv_cache.py",
+          "source_sha256": "a66d716f09e24736da70fb4c7d0b2e267e88782846585eb39a019a639a41b30e"
+        },
+        {
+          "source_bytes": 16934,
+          "source_path": "tah/engine/tests/test_model.py",
+          "source_sha256": "67bbd57d41fc78fb2677ade926a9aafc803d8d3dc643fe046c630db5ba43b833"
+        },
+        {
+          "source_bytes": 4444,
+          "source_path": "tah/engine/tests/test_parity.py",
+          "source_sha256": "115d2c2108a3ccad813719b3acacfd2fbc5db5a4b8d6c774cc1256fa972fcd1a"
+        },
+        {
+          "source_bytes": 1825,
+          "source_path": "tah/engine/tests/test_rope.py",
+          "source_sha256": "3313f9cc8d1d85dd254b6b94e443a132395d94dc21c85c97a1eb2186379af5e3"
+        },
+        {
+          "source_bytes": 17453,
+          "source_path": "tah/engine/tests/test_sampling.py",
+          "source_sha256": "1c035184f046aca56d54cf131aabc7cdad736345cf3ef564d52bdf0b8f85452f"
+        },
+        {
+          "source_bytes": 8525,
+          "source_path": "tah/engine/tests/test_sampling_gpu.py",
+          "source_sha256": "109fc4f0fbe9b10313ca1d2569fd84449bf56b555276302b2c5d07e0c8de1228"
+        },
+        {
+          "source_bytes": 13678,
+          "source_path": "tah/engine/weights.py",
+          "source_sha256": "e62a5362244a9e7405111ca68732dcf326149466a695cf6887e57f96c59798f5"
+        },
+        {
+          "source_bytes": 990,
+          "source_path": "tah/evaluate/__init__.py",
+          "source_sha256": "9f362a453ee7ed4973739d4a1f3d3e6fa209a2cd0dcb59b02d4eb1b57b6331ce"
+        },
+        {
+          "source_bytes": 15089,
+          "source_path": "tah/evaluate/backends.py",
+          "source_sha256": "3fba19e91d559823c31563fd09c9b54844c4e703746040d3a7b1e2aff1344e7e"
+        },
+        {
+          "source_bytes": 2268,
+          "source_path": "tah/evaluate/code_prompts.py",
+          "source_sha256": "d31ace590ee9b4706e7a63edd90086f0944cfaa01da84e67105fa480f9b7d58b"
+        },
+        {
+          "source_bytes": 13212,
+          "source_path": "tah/evaluate/codeeval.py",
+          "source_sha256": "4ec8861e3b1d8635470cab95538b7645b7b2bd2c8182b8ab30ff6f53d5feceb6"
+        },
+        {
+          "source_bytes": 5899,
+          "source_path": "tah/evaluate/datasets.py",
+          "source_sha256": "4f52eeec0797cc4d81674e6bdbdc3b13c5585488459a3e2d3656a70730dffb5e"
+        },
+        {
+          "source_bytes": 51175,
+          "source_path": "tah/evaluate/jobs.py",
+          "source_sha256": "f848f2a49056e689e4bf370269452e4c31bcf253b6e13747ba02a3ba93ce808c"
+        },
+        {
+          "source_bytes": 4125,
+          "source_path": "tah/evaluate/matheval.py",
+          "source_sha256": "9b92faf373464dbd9fbcb387c3b02d747eb80637e2a60bf9885b0ff9846982aa"
+        },
+        {
+          "source_bytes": 2686,
+          "source_path": "tah/evaluate/progress.py",
+          "source_sha256": "e7b9c3feb177a2e9f42405e4ac0213d6dc90ae9d4350ef74e615059fb9c1d7e8"
+        },
+        {
+          "source_bytes": 6972,
+          "source_path": "tah/evaluate/results.py",
+          "source_sha256": "bde07fa27dc2fbbc4260e167d566f08ec3489f57fd7fac1da4cfd88c00d9e9cb"
+        },
+        {
+          "source_bytes": 995,
+          "source_path": "tah/model/__init__.py",
+          "source_sha256": "00285c2d9062cea04b59a195588d7781cfc877187dc02a440d70b498bff17189"
+        },
+        {
+          "source_bytes": 10859,
+          "source_path": "tah/model/causal_cache.py",
+          "source_sha256": "54a057ea9e421816556c97748550fb1a9fde0fec56060273760b8d52d98dbd49"
+        },
+        {
+          "source_bytes": 14948,
+          "source_path": "tah/model/iter_decider.py",
+          "source_sha256": "e1b961584f684379138359e79af89b44f8a7b2121760370349ec2438c15731f6"
+        },
+        {
+          "source_bytes": 11998,
+          "source_path": "tah/model/loss.py",
+          "source_sha256": "9a5914040770d8d205ee24759eafd752b057063ffaac63b8bc6b145b4d0451d3"
+        },
+        {
+          "source_bytes": 2306,
+          "source_path": "tah/model/tah_config.py",
+          "source_sha256": "0f94404fde09b424facb6c4464e2d6e829d54d5fa893baa0c5bbff34fed0a391"
+        },
+        {
+          "source_bytes": 42907,
+          "source_path": "tah/model/tah_model.py",
+          "source_sha256": "9febfa06f81d7022cd70854ec73ed0b6d565e49333779b34a4af3a15f1cfae96"
+        },
+        {
+          "source_bytes": 11194,
+          "source_path": "tah/model/utils.py",
+          "source_sha256": "e534e4b93a227ca8b3922a4541eea27c33e1597fda2ce871768fbd7ba0c8317c"
+        }
+      ],
+      "top_level_keys_or_columns": [
+        "schema_version",
+        "conclusion",
+        "design",
+        "sizes",
+        "validity",
+        "forced",
+        "tail_looks",
+        "secondary_reference_b1",
+        "tail_stopped_at_look",
+        "self_split",
+        "composition",
+        "c1",
+        "gpu_time",
+        "provenance"
       ]
     },
     "r2_speed.json": {

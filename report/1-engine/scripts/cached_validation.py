@@ -11,7 +11,13 @@ from tah.engine.kv_cache import SlotPool
 from tah.engine.model import EagerTaHModel, TeacherForcedOutput
 from tah.engine.parity import (assert_gtf, compare_output, derive_decision_limits,
                                gtf_summary, production_noise, require_production)
-from tah.engine.tests.test_gtf import test_gtf_every_wp2_fixture_set as run_oracle_gtf
+from tah.engine.tests import test_gtf as gtf_tests
+
+_gtf_test_candidates = [value for name, value in vars(gtf_tests).items()
+                        if name.startswith('test_gtf_every_') and name.endswith('_fixture_set')]
+if len(_gtf_test_candidates) != 1:
+    raise RuntimeError('Expected one full-fixture G-TF test entry point')
+run_oracle_gtf = _gtf_test_candidates[0]
 
 pytestmark = [pytest.mark.gpu, pytest.mark.slow,
               pytest.mark.skipif(os.environ.get('CUDA_VISIBLE_DEVICES') == '', reason='CUDA hidden; production cached G-TF deferred')]
@@ -22,14 +28,14 @@ pytestmark = [pytest.mark.gpu, pytest.mark.slow,
 def test_cached_production_gtf(name, chunk_size, monkeypatch):
     suite = FixtureSuite(os.environ.get('TAH_GTF_FIXTURES', 'data/engine/fixtures/reference'))
     require_production(suite)
-    tolerances_path = Path(os.environ.get('TAH_GTF_TOLERANCES', 'data/engine/wp2/tolerances.json'))
+    tolerances_path = Path(os.environ['TAH_GTF_TOLERANCES'])
     noise = production_noise(suite, name, json.loads(tolerances_path.read_text()))
     decision_limits = derive_decision_limits(noise)
-    # Identical to WP3's predeclared self-noise limits; never infer these from
+    # Identical to the predeclared self-noise limits; never infer these from
     # candidate cached outputs or reuse the obsolete fixed-decision gate.
-    wp3_limits_path = Path(os.environ['ENGINE_REPORT_OUTPUT']) / 'full' / f'{name}-limits.json'
-    if wp3_limits_path.exists():
-        assert decision_limits == json.loads(wp3_limits_path.read_text())['decision_limits']
+    limits_path = Path(os.environ['ENGINE_REPORT_OUTPUT']) / 'full' / f'{name}-limits.json'
+    if limits_path.exists():
+        assert decision_limits == json.loads(limits_path.read_text())['decision_limits']
     original_forward = EagerTaHModel.forward
     paired = []
     templates = [suite.load(r) for r in suite.records(kind='teacher_forced', checkpoint=name) if r['variant'] == 'single']
@@ -68,7 +74,7 @@ def test_cached_production_gtf(name, chunk_size, monkeypatch):
         del pool
         full = original_forward(model, ids, iter_count_labels=labels, hidden_positions=selected)
         template = next(t for t in templates if torch.equal(t['input_ids'], ids.cpu()))
-        # Full WP3 traces and retained coordinates become the paired oracle,
+        # Full-sequence traces and retained coordinates become the paired oracle,
         # with the same production self-noise limits (no tolerance floor).
         paired_template = dict(template)
         for key in ['visited', 'decision', 'decision_logits', 'continue_probability', 'decider_hidden']:
@@ -87,7 +93,7 @@ def test_cached_production_gtf(name, chunk_size, monkeypatch):
     run_oracle_gtf(name)
     stats = gtf_summary(paired)
     report = dict(
-        production_gates_eligible=True, gate='G-TF cached vs WP3 full',
+        production_gates_eligible=True, gate='G-TF cached vs full reference',
         chunk_size=chunk_size, summary=stats, comparisons=paired,
         decision_limits=decision_limits, noise_limits=noise)
     try:
@@ -98,7 +104,7 @@ def test_cached_production_gtf(name, chunk_size, monkeypatch):
     else:
         report['status'] = 'PASS'
     finally:
-        (destination / f'{name}-vs-wp3.json').write_text(json.dumps(report, indent=2))
+        (destination / f'{name}-vs-full.json').write_text(json.dumps(report, indent=2))
 
 if __name__ == '__main__':
     import argparse

@@ -6,8 +6,6 @@ import hashlib
 import importlib.util
 import json
 import re
-import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 import statistics
@@ -17,7 +15,7 @@ REPO = ROOT.parents[1]
 DATA = ROOT / 'data'
 R2_DATA = REPO / 'report/2-baseline/data'
 ENGINE_RUNS = REPO / 'data/engine'
-WP21 = REPO / 'data/tmp/wp21/gpu'
+MEMORY_AB = REPO / 'data/engine/memory_ab'
 REASONING_BENCHMARKS = {'aime25', 'amc23', 'olympiadbench', 'math500', 'gpqa'}
 CODE_BENCHMARKS = {'humaneval', 'mbpp'}
 
@@ -175,15 +173,11 @@ def memory_ab():
     budgets = {}
     page_bytes = None
     for budget, (comparison_name, old_name, new_name) in reports.items():
-        comparison_path = WP21 / comparison_name
+        comparison_path = MEMORY_AB / comparison_name
         if not comparison_path.exists():
-            comparison = subprocess.run(
-                [sys.executable, str(REPO / 'data/tmp/wp21/ab.py'), 'compare',
-                 str(WP21 / old_name), str(WP21 / new_name)], check=True, capture_output=True, text=True)
-            json.loads(comparison.stdout)
-            comparison_path.write_text(comparison.stdout.rstrip() + '\n')
+            raise FileNotFoundError(f'Missing saved comparison {comparison_path}; copy the recorded comparison JSON into data/engine/memory_ab')
         comparison = json.loads(comparison_path.read_text())
-        old_path, new_path = WP21 / old_name, WP21 / new_name
+        old_path, new_path = MEMORY_AB / old_name, MEMORY_AB / new_name
         old, new = json.loads(old_path.read_text()), json.loads(new_path.read_text())
         sources.extend([source(comparison_path), source(old_path), source(new_path)])
         if comparison['requests'] != len(old['results']) or comparison['requests'] != len(new['results']):
@@ -203,7 +197,7 @@ def memory_ab():
     large = budgets['8g']
     if not large['identical_outputs'] or large['restarts'] != dict(old=0, new=0):
         raise ValueError('The 8 GiB no-overflow comparison must be token-identical and have no restarts')
-    reference_run = json.loads((WP21 / reports['8g'][2]).read_text())
+    reference_run = json.loads((MEMORY_AB / reports['8g'][2]).read_text())
     args = reference_run['args']
     record = dict(workload=dict(benchmark='MATH500', requests=args['requests'], batch_size=args['batch_size'],
                                 max_new_tokens=args['max_new_tokens'], kv_capacity=reference_run['kv_capacity']),

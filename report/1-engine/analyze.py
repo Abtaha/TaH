@@ -252,7 +252,7 @@ def compare_r1_samples(index,rows,expected):
     by_run={name:{dataset:[] for dataset in expected} for name in [index['reference']['name'],*[x['name'] for x in index['engine']]]}
     for row in rows:
         by_run[row['run']][row['dataset']].append(row)
-    scratch=REPO/'data/tmp/wp25/checks/1-engine'
+    scratch=REPO/'data/tmp/report-1-engine/checks'
     scratch.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='compare-r1-',dir=scratch) as temporary:
         roots={}
@@ -422,6 +422,182 @@ def ratio_cells(reports):
     return cells
 
 
+R1O_FACTS = {}
+
+
+def r1o_section():
+    """Render the amended saved looks, never the legacy maximum-rule conclusion.
+
+    Confidence bounds are retained study estimates, not recomputed from rounded
+    means. Audit the numerical decisions and first-success stopping independently.
+    """
+    d = read('r1o.json'); design = d['design']; delta = design['delta']
+    margin = 1 + delta
+    facts = {}; catalog = {}; rendered = {}
+
+    def number(key, value, meaning, digits=6):
+        key = 'r1o_' + key
+        text = format(value, f'.{digits}g') if isinstance(value, float) else str(value)
+        facts[key] = text
+        catalog[key] = dict(value=value, rendered=text, meaning=meaning)
+        return text
+
+    def add(name, headers, rows):
+        rendered[name] = dict(headers=headers, rows=rows)
+        facts[name + '_table'] = table(name, headers, rows)
+
+    number('delta_percent', 100*delta, 'Relative non-inferiority margin (%)')
+    number('ratio_limit', margin, 'Upper engine/reference error ratio allowed')
+    number('confidence_percent', 100*(1-design['alpha_per_look']), 'One-sided confidence at each of two looks (%)')
+    for key in ('alpha_per_look', 'resamples', 'bootstrap_seed', 'quantile', 'minimum_tail_events',
+                'c1_increment', 'c1_maximum', 'withdrawn_c2_margin_pp', 'maximum_teacher_forced_length', 'oracle_threshold'):
+        number(key, design[key], 'Registered ' + key.replace('_', ' '))
+    for key in ('runtime', 'device'):
+        number(key, read('method.json')['reproduction']['r1o'][key], 'R1-O reproduction ' + key)
+    number('validity_factor', design['validity_factor'], 'Maximum fp32/fp64 error as fraction of bf16-reference error')
+    secondary = d['secondary_reference_b1']
+    for metric, item in secondary['metrics'].items():
+        for key, value in item.items():
+            number(f'b1_{metric}_{key}', value, f'Descriptive b1 secondary {metric}: {key} (original 95% bound if applicable)')
+    binding = []
+    validity = d['validity']
+    assert validity['sequences'] >= design['validity_min_sequences'] and validity['positions'] >= design['validity_min_positions']
+    for name in ('sequences', 'positions'):
+        number('validity_' + name, validity[name], 'Oracle-validity ' + name)
+    rows = []
+    for metric, r in validity['metrics'].items():
+        assert math.isclose(r['limit'], design['validity_factor']*r['reference_vs_fp64'], rel_tol=1e-12)
+        passed = r['fp32_vs_fp64'] <= r['limit']; binding.append(passed)
+        assert r['status'] == ('PASS' if passed else 'not shown')
+        cells = [number('validity_' + metric + '_' + key, r[key], metric + ' validity: ' + key.replace('_', ' '))
+                 for key in ('fp32_vs_fp64', 'reference_vs_fp64', 'limit')]
+        rows.append([metric, *cells, r['status']])
+    add('r1o_validity', ['Metric', 'fp32 vs fp64', 'bf16 ref. vs fp64', 'Limit', 'Result'], rows)
+
+    rows = []
+    for metric, r in d['forced'].items():
+        bias = metric == 'bias'
+        limit = 0 if bias else margin
+        passed = r['upper975'] <= limit; binding.append(passed)
+        assert r['status'] == ('PASS' if passed else 'not shown')
+        if not bias:
+            assert math.isclose(r['estimate'], r['engine']/r['reference'], rel_tol=1e-12)
+        else:
+            assert math.isclose(r['D'], abs(r['engine_bias']) - margin*abs(r['reference_bias']) - delta*r['reference_M2'], abs_tol=1e-15)
+        for key, value in r.items():
+            number('forced_' + metric + '_' + key, value, metric + ' forced: ' + key.replace('_', ' '))
+        prefix = 'r1o_forced_' + metric + '_'
+        rows.append([metric, facts[prefix + ('engine_bias' if bias else 'engine')],
+                     facts[prefix + ('reference_bias' if bias else 'reference')], facts[prefix + ('D' if bias else 'estimate')],
+                     facts[prefix+'upper975'], str(limit), str(r['stopped_at_look']), r['status']])
+    add('r1o_forced', ['Metric', 'Engine error / bias', 'Ref. error / bias', 'Ratio / paired D',
+                       'Upper 97.5%', 'Limit', 'Stop look', 'Result'], rows)
+
+    tail_rows = []; max_rows = []
+    for look in d['tail_looks']:
+        n = look['sequences']; index = look['look']
+        assert n == d['sizes']['stage1']['sequences'] + (d['sizes']['stage2']['sequences'] if index == 2 else 0)
+        for key in ('sequences', 'positions'):
+            number(f'free_look{index}_{key}', look[key], f'Free-mode look {index} {key}')
+        for kind, r in look['criteria'].items():
+            prefix = f'tail_look{index}_{kind}_'
+            assert math.isclose(r['D'], r['engine_mean_q90'] - margin*r['reference_mean_q90'], abs_tol=1e-14)
+            observed = r['upper975'] <= 0 and min(r['engine_events'], r['reference_events']) >= design['minimum_tail_events']
+            assert r.get('observed_status', r['status']) == ('PASS' if observed else 'not shown')
+            for key in ('engine_mean_q90', 'reference_mean_q90', 'D', 'upper975', 'engine_events', 'reference_events', 'status'):
+                number(prefix + key, r[key], f'Look {index} {kind} tail: ' + key.replace('_', ' '))
+            stop = d['tail_stopped_at_look'][kind]
+            assert stop == next(item['look'] for item in d['tail_looks']
+                                if item['criteria'][kind].get('observed_status', item['criteria'][kind]['status']) == 'PASS')
+            number(f'tail_{kind}_stopped_at_look', stop, f'Permanent first-success look for {kind} tail')
+            tail_rows.append([kind, str(index), str(n), facts['r1o_'+prefix+'engine_mean_q90'], facts['r1o_'+prefix+'reference_mean_q90'],
+                              facts['r1o_'+prefix+'upper975'], f"{r['engine_events']}/{r['reference_events']}",
+                              r.get('observed_status', r['status']) + (' (descriptive)' if index > stop else '')])
+            if index == stop:
+                binding.append(observed)
+            m = look['original_maximum']['criteria'][kind]
+            assert look['original_maximum']['binding'] is False
+            assert math.isclose(m['limit'], margin*m['reference'], rel_tol=1e-12)
+            assert m['status'] == ('PASS' if m['engine'] <= m['limit'] else 'not shown')
+            for key, value in m.items():
+                number(f'max_look{index}_{kind}_{key}', value, f'Descriptive maximum, look {index}, {kind}: {key}')
+            max_rows.append([kind, str(index), str(n), *[facts[f'r1o_max_look{index}_{kind}_{k}'] for k in ('engine', 'reference', 'limit')], m['status']])
+    add('r1o_tails', ['Tail', 'Look', 'Sequences', 'Engine q90 mean', 'Ref. q90 mean', 'Upper 97.5% of D', 'Events E/R', 'Observed result'], tail_rows)
+    add('r1o_maximum', ['Margin', 'Look', 'Sequences', 'Engine max', 'Ref. max', 'Limit', 'Descriptive result'], max_rows)
+
+    c = d['c1']; r = c['C1']
+    assert math.isclose(r['difference'], r['engine_mean']-r['reference_mean'], abs_tol=1e-12)
+    assert math.isclose(r['limit'], -delta*r['reference_mean'], abs_tol=1e-12)
+    passed = r['difference_lower'] >= r['limit']; binding.append(passed)
+    assert r['status'] == ('PASS' if passed else 'not shown') and r['difference_lower'] <= r['difference']
+    for key in ('cap', 'prompt_limit', 'look'):
+        number('c1_' + key, c[key], 'C1 ' + key.replace('_', ' '))
+    for key, value in r.items():
+        number('c1_' + key, value, 'C1 ' + key.replace('_', ' '))
+    for key, value in c['datasets'].items():
+        number('c1_' + key + '_problems', value, 'C1 eligible problems in ' + key)
+    for key, value in c['censoring_counts'].items():
+        number('c1_' + key + '_count', value, 'C1 count: ' + key.replace('_', ' '))
+        number('c1_' + key + '_rate', c['censoring'][key], 'C1 fraction: ' + key.replace('_', ' '))
+        assert math.isclose(c['censoring'][key], value/r['problems'])
+    for arm in ('engine', 'reference'):
+        number('c1_' + arm + '_early_identical', c['early_identical_counts'][arm], arm + ' identical early-EOS trajectories (excludes cap censoring)')
+    add('r1o_c1', ['Problems', 'Engine prefix', 'Ref. prefix', 'Difference', 'Lower 97.5%', 'Limit', 'Stop look', 'Result'],
+        [[facts['r1o_c1_'+k] for k in ('problems', 'engine_mean', 'reference_mean', 'difference', 'difference_lower', 'limit', 'look', 'status')]])
+    add('r1o_censoring', ['Implementation', 'Cap-censored', 'Identical early EOS', 'No observed difference (all)', 'Problems'],
+        [[arm, str(c['censoring_counts'][arm+'_cap_censored']), str(c['early_identical_counts'][arm]),
+          str(c['censoring_counts'][arm+'_no_observed_difference']), str(r['problems'])] for arm in ('engine', 'reference')])
+
+    rows = []
+    for comparison, demo in d['composition'].items():
+        for key in ('alpha', 'confidence'):
+            number('composition_' + comparison + '_' + key, demo[key], comparison + ' diagnostic ' + key)
+        for kind, item in demo['criteria'].items():
+            prefix = f'composition_{comparison}_{kind}_'
+            phi = demo['composition_correlations'][kind]['disagreement_position_phi']
+            for key in ('engine_mean_q90', 'reference_mean_q90', 'upper_bound', 'status'):
+                number(prefix + key, item[key], f'{comparison}, {kind}: {key}')
+            number(prefix + 'phi', phi, f'{comparison}, {kind}: correlation of disagreement positions (phi)')
+            for key, value in item['original_max'].items():
+                number(prefix + 'maximum_' + key, value, f'{comparison}, {kind}: descriptive maximum {key}')
+            rows.append([comparison.replace('_', ' '), kind, facts['r1o_'+prefix+'engine_mean_q90'], facts['r1o_'+prefix+'reference_mean_q90'],
+                         facts['r1o_'+prefix+'upper_bound'], facts['r1o_'+prefix+'phi'], item['status'], item['original_max']['status']])
+    add('r1o_composition', ['Comparison', 'Tail', 'Candidate q90', 'Comparator q90', 'Upper D', 'Phi', 'Tail result', 'Max result'], rows)
+    diag = d['self_split']; rows = []
+    for key in ('sequences', 'per_half', 'splits', 'bootstrap_per_split', 'exact_permutations'):
+        number('self_split_' + key, diag[key], 'CPU random-half diagnostic ' + key.replace('_', ' '))
+    for kind, rates in diag['rates'].items():
+        for key, rate in rates.items():
+            number('self_split_' + kind + '_' + key + '_percent', 100*rate, f'{kind} self-split {key} (%)')
+        rows.append([kind, *[facts[f'r1o_self_split_{kind}_{key}_percent'] for key in
+                            ('max_not_shown', 'equality_false_alarm', 'boundary_false_noninferiority', 'noninferiority_not_shown')]])
+    add('r1o_self_split', ['Margin', 'Max not shown (%)', 'Equality false alarm (%)', 'Boundary false NI (%)', 'NI not shown (%)'], rows)
+    time = d['gpu_time']
+    assert math.isclose(time['total_block_seconds'], sum(r['seconds'] for r in time['runs']))
+    number('gpu_block_hours', time['total_block_seconds']/3600, 'Successful-block GPU wall time in hours; excludes loading, failures and gaps')
+    rows = []
+    for run in time['runs']:
+        key = run['phase'].replace('/', '_').replace('-', '_')
+        rows.append([run['phase'], number('gpu_' + key + '_minutes', run['seconds']/60, 'Saved block minutes: ' + run['phase'])])
+    add('r1o_runtime', ['Phase', 'Successful-block minutes'], rows)
+    verdict = 'PASS' if all(binding) else 'not shown'
+    assert verdict == d['conclusion'] and not design['maximum_binding'] and design['C2_withdrawn']
+    number('verdict', verdict, 'Amended R1-O conclusion from validity, forced errors/bias, stopped tails and C1')
+    for subset, size in d['sizes'].items():
+        for key in ('sequences', 'positions', 'max_total_length'):
+            number('size_' + subset + '_' + key, size[key], subset + ' ' + key.replace('_', ' '))
+        for group in ('datasets', 'generators'):
+            for name, count in size[group].items():
+                number(f'size_{subset}_{group}_{name}', count, f'{subset}: sequence count by {group}, {name}')
+    reordered = next(run for run in time['runs'] if run['phase']=='o1/stage1/engine-free-reordered')['settings']
+    for key in ('block', 'max_batch_size'):
+        number('composition_' + key, reordered[key], 'Reordered-engine composition setting: ' + key)
+    number('kv_capacity', d['provenance']['kv_capacity'], 'Fixed engine capture KV-capacity launch setting (entries)')
+    R1O_FACTS.clear(); R1O_FACTS.update(facts)
+    (TABLES/'r1o-analysis.json').write_text(json.dumps(dict(conclusion=verdict, placeholders=catalog, tables=rendered), indent=2, sort_keys=True)+'\n')
+    return facts
+
+
 def main():
     import re
     TABLES.mkdir(exist_ok=True);(ROOT/'figures').mkdir(exist_ok=True)
@@ -490,7 +666,7 @@ def main():
     values['equivalence_table']=table('equivalence',columns,rows)
     values['ratio_max']=fmt(max(largest),2)
     appendix=table('equivalence_layouts',['Checkpoint','Layout',*columns[1:]],detail)
-    (ROOT/'APPENDIX.md').write_text('# Per-layout numerical equivalence\n\nEach cell is the engine-versus-reference rate divided by the reference-versus-reference rate on the same sequences (1.0 = the engine differs from the reference as much as the reference differs from itself under a different execution layout; limit 1.5). Decision flips compare continue/stop decisions (maximum over depths); pass-count mismatch compares final passes per token; logit RMSE is the root mean squared logit difference; top-1 mismatch compares the highest-logit token. Exact means both counts are zero. Layouts: full sequence, cached with 1 or 256 tokens per step, and generated sequences.\n\n'+appendix+'\n\nSee [the chapter](README.md#numerical-equivalence).\n')
+    values['equivalence_layouts_table']=appendix
     values['greedy_passed']=str(sum(g['status']=='PASS' and g['median_first_divergence']>=g['median_limit'] for g in eq['greedy']))
     values['checkpoint_count']=str(len(CHECKPOINTS))
     diagnostics=read('diagnostics.json');rat=[]
@@ -502,6 +678,7 @@ def main():
     values.update(run_table(policy['confirmatory']))
     values.update(exact_section())
     values.update(port_section())
+    values.update(r1o_section())
     robust=read('robustness.json');tests=robust['tests'];rows=[]
     for key,label in [('swap','Swap identity'),('stress','Long generation'),('prompt','Long + short prompts'),('restart','Overflow restart')]:
         r=tests[key];audit=r['kv_audit'];run=r['run']
@@ -526,6 +703,11 @@ def main():
     missing=set(re.findall(r'\{\{(\w+)\}\}',template))-values.keys()
     if missing:raise ValueError('Unfilled template fields: '+str(missing))
     (ROOT/'README.md').write_text(re.sub(r'\{\{(\w+)\}\}',lambda m:values[m[1]],template))
+    appendix_template=(ROOT/'APPENDIX.template.md').read_text()
+    appendix_template=re.sub(r'\{\{#overlap\}\}(.*?)\{\{/overlap\}\}',lambda m:m[1] if 'overlap' in perf['runs'] else '',appendix_template,flags=re.S)
+    missing=set(re.findall(r'\{\{(\w+)\}\}',appendix_template))-values.keys()
+    if missing:raise ValueError('Unfilled appendix template fields: '+str(missing))
+    (ROOT/'APPENDIX.md').write_text(re.sub(r'\{\{(\w+)\}\}',lambda m:values[m[1]],appendix_template))
     print(f'Verified {len(manifest["files"])} curated files; generated chapter, appendix, tables and PDF.')
 
 if __name__=='__main__':main()

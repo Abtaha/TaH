@@ -4,47 +4,32 @@
 
 ## Summary
 
-Think-at-Hard (TaH) lets a learned decider send hard tokens through the model a second time, using a low-rank adapter (LoRA). The reference implementation is slow: a Python loop handles one token at a time, extra passes are separate model calls and batches are padded to the longest request.
-
-The engine runs the same algorithm with mixed-depth batches, a shared key/value (KV) cache and CUDA graphs. Correctness is tested at three levels: same algorithm (exact on CPU), each model step within 1.5× the reference's own numerical noise, and accuracy against a pre-registered ±3 pp margin. That accuracy test (R1) gives **equivalence not shown**: engine minus reference +1.3 pp (90% CI [-1.1, +3.7], half-width 2.4 pp against the ±3 pp margin), so the accuracy test alone cannot settle equivalence; the numerical comparison against a high-precision oracle (R1-O) is the stronger test. On the NVIDIA GeForce RTX 3090, the engine generates **1620 tokens/s, 20.7× the reference** on W-perf (128 requests, up to 4096 new tokens).
+Think-at-Hard (TaH) lets a learned decider send hard tokens through the language model a second time, using a small add-on (a low-rank adapter, LoRA). The original (reference) implementation is slow, so this chapter tests an engine that runs the same algorithm with mixed-depth batches, a shared key/value (KV) memory and CUDA graphs. Measured against a near-exact computation of the same model, the engine's rounding errors are no larger than the reference's within a pre-registered 10% margin (the numerical test, R1-O: **PASS**). On the NVIDIA GeForce RTX 3090 it generates **1620 tokens/s, 20.7× the reference**, on the speed workload W-perf (128 requests, up to 4096 new tokens), and 693–1050 tokens/s with answers up to 8192 tokens (the reference was not measured there). Still open: the independent-sample accuracy test (R1, ±3 percentage points, pp) gives **equivalence not shown** because it lacked power, not because it found a problem, and the stricter ±1 pp coupled accuracy test was withdrawn before any data.
 
 ## What the engine changes
 
 - **Mixed-depth batches:** one row per sequence per step, on its first or second pass, so no request waits for another's extra pass.
-- **Shared KV cache pool:** one-token pages avoid padding to the longest request.
-- **Row-masked LoRA:** the adapter is switched on per row; one copy of the weights serves both passes.
-- **CUDA graphs:** captured decode steps remove most launch overhead.
+- **Shared KV cache pool:** the cache holds what the model has already read; one-token pages avoid padding.
+- **Row-masked LoRA:** the adapter is switched on per row, so one copy of the weights serves both passes.
+- **CUDA graphs:** a GPU feature that replays a recorded sequence of operations, removing launch overhead.
 - **Overlap scheduling:** the next step is prepared while the GPU runs.
 - **Swap and restart:** preempted requests move to host memory, or restart from the prompt if it is full.
 
-Two memory-only changes were made after the accuracy runs. First, during the reproduction runs, cached host-memory pages kept ready for direct GPU transfers were released periodically, which stopped host RAM from growing with swapping. Then swapping was moved into one fixed host buffer allocated at start-up, so the host memory used for swapping equals the configured budget for the whole run. Neither change alters the computation. With no buffer overflow, outputs are token-identical to the previous version: 48 requests, 135 swaps, total swap time 5.17 s → 0.11 s, host-memory growth 1.534 → 0.050 GiB. When the buffer is full, the engine now decides in whole 28 MiB pages, which can change which requests restart.
-
-**Reproduce:** the A/B comparison uses `data/tmp/wp21/ab.py` (5–10 min, GPU); `./reproduce.sh memory_ab` curates the saved results (seconds, CPU) into `data/memory_ab.json`.
+Two memory-only changes made after the accuracy runs do not alter the computation ([appendix](APPENDIX.md#memory-only-changes)).
 
 ## Results
 
 ### Equivalence to the reference
 
-The claim is that the engine is as correct as the original implementation. In bf16 there is no single correct output: the reference itself changes with batch size, padding and layout. So correct means: **the engine differs from the reference no more than the reference differs from itself.** Three levels test this.
+**What is claimed.** The engine is as accurate as the original implementation, up to a stated margin. Both run in bf16, a compact number format with roughly three significant digits, so neither is exact, and the reference itself changes slightly with batch size and layout. The question is therefore: **is the engine further from the exact computation than the reference is?** Four levels of evidence answer it, from "is it the same algorithm?" to "does the benchmark score agree?".
 
-#### Level 0 — same algorithm (exact)
+#### Level 0 — same algorithm (exact on CPU)
 
-On CPU, where results are deterministic, the engine's teacher-forced forward is compared with the reference at atol = rtol = 0: every logit coordinate, decision, pass count and top-1 token.
+On CPU, where arithmetic is deterministic, the engine and the reference are fed the same fixed text ("teacher forcing": the model reads given text and we record its prediction at every position) and agree exactly on every logit (raw score), decision, pass count and top-1 token (highest-scoring next token), on tiny models with random weights ([table](APPENDIX.md#level-0-exact-comparison)). **Reproduce:** `./reproduce.sh exact`: under 1 min, CPU; `data/exact.json`.
 
-| Model | Records | Positions | Logit coordinates | Mismatches | Max logit difference |
-| --- | --- | --- | --- | --- | --- |
-| Tiny mlp3, mlp1, label3 (caps 3, 1, 3) | 135 | 6975 | 676,575 | 0 | 0.0 |
-| Tiny label3, one 4096-token sequence | 1 | 4096 | 397,312 | 0 | 0.0 |
-| Released TaH-plus 1.7B, 8 tokens | 1 | 8 | 1,215,488 | 0 | 0.0 |
-| Full-size synthetic mlp3, mlp1, label3, 8 tokens each | 3 | 24 | 3,646,464 | 0 | 0.0 |
+#### Level 1 — each step is indistinguishable from the reference's own noise
 
-Cap is the maximum passes per token; mismatches sum differing decisions, pass counts and top-1 tokens. The tiny models have 2 layers and random LoRA weights; 14 further random constructor variants (caps 1–5, 2–3 layers) are exact too. Scope: exact checks cover the CPU path. The full model at full length was not run exactly because CPU compute is insufficient, and on GPU bf16 kernels make bit-exactness undefined; level 1 covers that.
-
-**Reproduce:** `./reproduce.sh exact`: under 1 min, CPU; writes `data/exact.json`.
-
-#### Level 1 — each model step is indistinguishable from reference noise
-
-On the GPU, each cell is a ratio: engine-versus-reference disagreement divided by reference-versus-reference disagreement on the same sequences. 1.0 means the engine differs from the reference exactly as much as the reference differs from itself under another execution layout; the limit is 1.5.
+On GPU the reference disagrees with itself when its execution layout changes, a yardstick for harmless noise. Each cell is engine-versus-reference disagreement divided by reference-versus-reference disagreement on the same sequences; 1.0 means the engine differs from the reference exactly as much as the reference differs from itself, and the limit is 1.5.
 
 | Checkpoint | Decision flips | Pass-count mismatch | Logit RMSE | Top-1 mismatch | Result |
 | --- | --- | --- | --- | --- | --- |
@@ -53,23 +38,68 @@ On the GPU, each cell is a ratio: engine-versus-reference disagreement divided b
 | mlp1 | exact | exact | 1.04 | 1.20 | PASS |
 | label3 | exact | exact | 1.04 | 1.07 | PASS |
 
-Decision flips: differing continue/stop decisions; pass-count mismatch: tokens with another number of passes; top-1 mismatch: a different highest-logit token. Cells are maxima over layouts ([detail](APPENDIX.md)). `real` is the released TaH-plus 1.7B; the others are synthetic models for other decider paths.
+Columns: differing decisions, differing pass counts, root mean squared difference of raw scores (logit RMSE) and differing top-1 token; cells are maxima over layouts. `real` is the released TaH-plus 1.7B, the others synthetic models. A defect large enough to move accuracy would show as a multiple of the noise, not as ratios of at most 1.23. Layouts, long-context and sampler checks: [appendix](APPENDIX.md#level-1-per-layout-ratios-and-further-checks).
 
-Logit RMSE ratios on long contexts stay between 0.94 and 1.07; the sampler's total variation distance on identical logits is 0.005 per token; greedy generation passes the first-divergence check for 4/4 checkpoints. This level is the most sensitive: a defect large enough to move accuracy would show as a multiple of the noise, not as ratios of at most 1.23.
+**Reproduce:** `./reproduce.sh equivalence` (2–4 h, GPU, after `fixtures`) → `data/equivalence.json`; `./reproduce.sh diagnostics` (11–15 min, GPU) → `data/diagnostics.json`.
 
-**Reproduce:** `./reproduce.sh equivalence` (2–4 h, GPU, after `fixtures`) writes `data/equivalence.json`; `./reproduce.sh diagnostics` (11–15 min, GPU) writes `data/diagnostics.json`.
+#### Level 2 — error against a high-precision oracle (R1-O)
 
-#### Level 2 — benchmark accuracy (pre-registered R1)
+This is the core test: it builds a stand-in for "exact" and measures each implementation's distance from it. **The oracle** is the reference model computed in single-precision floating point (fp32), almost without rounding, with the model's own constants (e.g. the decider threshold, which bf16 rounds to 0.898438), so only arithmetic precision differs. It is **valid** because a ruler must be finer than what it measures: on 20 sequences (20670 positions) fp32 differed from double precision (fp64) by at most 0.05 of the bf16 reference's error on every metric below.
 
-Workload: MATH500 problems 0–199 and GPQA-Diamond (198), 2 samples per problem, up to 4096 new tokens, temperature 0.6, top-p 0.95, top-k 20, decider threshold 0.9. The reference ran once (seed 1234), the frozen engine three times (seeds 42, 1234, 2024). Per problem, accuracy is the mean over all samples of a backend (6 engine, 2 reference). The pre-registered test ([protocol](../PROTOCOL.md)) is a TOST: the 90% confidence interval (CI) of the pooled engine − reference difference over 398 problems must lie inside ±3 pp. Mean passes per generated token must agree within ±10%.
+| Metric | fp32 vs fp64 | bf16 ref. vs fp64 | Limit | Result |
+| --- | --- | --- | --- | --- |
+| M1 | 1.85993e-06 | 0.0130828 | 0.00065414 | PASS |
+| M2 | 1.00295e-06 | 0.00381015 | 0.000190507 | PASS |
+| M3 | 1.03087e-05 | 0.0873804 | 0.00436902 | PASS |
 
-| Run | MATH500 acc. (%) | GPQA acc. (%) | Restarts (host-swap overflow) |
-| --- | --- | --- | --- |
-| Reference, seed 1234 (confirmatory) | 67.0 | 30.6 | n/a |
-| Engine, seed 42 | 68.0 | 33.3 | 26 |
-| Engine, seed 1234 | 69.0 | 29.0 | 18 |
-| Engine, seed 2024 | 67.5 | 33.6 | 0 |
-| Engine, seeds pooled | 68.2 | 32.0 | 44 |
+**Reproduce (all R1-O tables):** `./reproduce.sh r1o` (6.08 h measured successful blocks (loading and gaps extra), RTX 3090 24 GiB; CPU curation in seconds) → `data/r1o.json`.
+
+**Per-step error with forced decisions (O1).** 64 sequences (177180 positions, up to 8192 tokens) from MATH500, GPQA-Diamond (reasoning questions), HumanEval+ and MBPP+ (coding tasks), half written by each implementation, are fed as fixed text to all three, with the oracle's continue/stop decisions imposed, so only arithmetic differs. Averaged over positions:
+
+- **M1, token probabilities:** total variation distance between the distribution each implementation would sample from and the oracle's, the share of probability that would have to move.
+- **M2, decider probability:** absolute error of the probability behind each continue/stop decision.
+- **M3, raw scores:** root mean squared error of the scores over the whole vocabulary, including tokens too unlikely to be sampled.
+- **Bias:** the signed M2 error, which would matter if errors consistently pushed the decider towards more (or less) thinking; the engine's drift must not exceed the reference's (paired difference D below zero).
+
+**Non-inferiority within 10%.** Equality cannot be proven from finite data, so the test is one-sided: the engine's error divided by the reference's must be at most 1.1, judged by the upper 97.5% bound of the ratio (the pessimistic end of its range, from resampling whole sequences 10000 times). The bound is stricter than usual because each criterion has up to two planned looks, at 64 and 200 sequences ([appendix](APPENDIX.md#two-looks-and-the-bound)).
+
+| Metric | Engine error / bias | Ref. error / bias | Ratio / paired D | Upper 97.5% | Limit | Stop look | Result |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| M1 | 0.00892726 | 0.0111792 | 0.79856 | 0.805223 | 1.1 | 1 | PASS |
+| M2 | 0.00375144 | 0.00375041 | 1.00027 | 1.00747 | 1.1 | 1 | PASS |
+| M3 | 0.0904935 | 0.0870572 | 1.03947 | 1.04861 | 1.1 | 1 | PASS |
+| bias | 0.000234567 | 0.00022498 | -0.000387952 | -0.000329501 | 0 | 1 | PASS |
+
+Columns: mean errors, engine/reference ratio (for bias, D), upper bound, limit, deciding look. All four succeeded at the first look; the M3 ratio (1.03947) is slightly above one but inside the margin.
+
+**Disagreements with free decisions: the tail criterion.** Now each implementation decides and picks its top-1 token itself. A disagreement matters in proportion to the oracle's *margin*, how clearly it prefers its own choice: a flip at a near-tie is harmless, a flip against a strong preference is a real error. Per sequence, the criterion takes the 0.9 quantile of its disagreements' margins (exceeded only by the most serious few), averages over sequences, and requires the engine's average to be at most 1.1 times the reference's, with the same bound. Fewer than 20 disagreements per implementation leaves a look undecided.
+
+This replaced the pre-registered **maximum rule**, which compares only the single largest margin: in a pilot comparing an implementation with random halves of itself it said "not shown" in 50% (decision) and 49.9% (top-1) of comparisons, a coin flip, while the tail criterion's error rates stayed near nominal ([appendix](APPENDIX.md#random-half-pilot)). It is still reported but not part of the verdict.
+
+| Tail | Look | Sequences | Engine q90 mean | Ref. q90 mean | Upper 97.5% of D | Events E/R | Observed result |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| decision | 1 | 64 | 0.00475501 | 0.00503398 | 6.93357e-05 | 1109/1120 | not shown |
+| top1 | 1 | 64 | 1.11745 | 1.25954 | -0.111354 | 3771/3783 | PASS |
+| decision | 2 | 200 | 0.0049049 | 0.00520664 | -0.000222369 | 3297/3301 | PASS |
+| top1 | 2 | 200 | 1.18438 | 1.33216 | -0.095465 | 11290/11257 | PASS (descriptive) |
+
+q90 mean is that quantile averaged over sequences, events are disagreement counts (engine/reference), D is the engine mean minus 1.1 times the reference mean (its upper bound must be below zero). Top-1 succeeded at the first look, decision at the second; the later top-1 row is descriptive.
+
+**C1: how long the text stays with the oracle's.** Every implementation uses the same random number at each step of each request, so differences from the oracle's text come from arithmetic. We count tokens generated before the text first differs from the oracle's (longer is better), up to 512 new tokens, on 692 MATH500 and GPQA-Diamond problems with prompts of at most 675 tokens (a memory limit). The engine passes if the lower 97.5% bound of its mean minus the reference's is at least −10% of the reference mean.
+
+| Problems | Engine prefix | Ref. prefix | Difference | Lower 97.5% | Limit | Stop look | Result |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 692 | 63.6936 | 64.091 | -0.397399 | -4.16763 | -6.4091 | 1 | PASS |
+
+The reference parts from the oracle's text after 64.091 tokens on average and the engine after 63.6936; bf16 rounding alone changes text within a few dozen tokens, so only the comparison with the reference is meaningful.
+
+**Why the per-step test is enough.** A generated answer is a chain of steps. If at every step the engine's sampling distribution is at least as close to the exact one as the reference's (up to the margin), whole answers are too, because the distance between whole-answer distributions is bounded by the sum of the per-step distances.
+
+**Verdict: PASS.** Oracle valid; M1–M3, bias, both tails and C1 within the margin. The engine is no less accurate than the reference beyond a 10% margin on these sequences; this is not a claim of identical output or of benchmark accuracy.
+
+#### Level 3 — benchmark accuracy on independent samples (R1)
+
+The practical check is the benchmark score: MATH500 and GPQA-Diamond (398 problems), two samples per problem, up to 4096 new tokens, settings in the [protocol](../PROTOCOL.md). The reference ran once, the engine three times with different random seeds (per-run accuracies: [appendix](APPENDIX.md#r1-runs)). The pre-registered equivalence test (TOST) requires the 90% confidence interval (CI: the range of differences consistent with the data) of the engine − reference accuracy difference to lie inside ±3 pp, and passes per token to agree within the protocol's tolerance.
 
 | Comparison | Dataset | Problems | Difference (pp) | 90% CI (pp) | Equivalence | Passes ratio |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -77,14 +107,14 @@ Workload: MATH500 problems 0–199 and GPQA-Diamond (198), 2 samples per problem
 | Engine − ref. 1234 | math500 | 200 | +1.2 | [-1.9, +4.3] | not shown | 1.000 |
 | Engine − ref. 1234 | gpqa | 198 | +1.4 | [-2.4, +5.2] | not shown | 0.997 |
 
-**Verdict: equivalence not shown.** The pooled interval is [-1.1, +3.7] pp; the upper end is above +3 pp, on the side where the engine is more accurate; the lower end rules out an engine deficit larger than 1.1 pp. The test had little room: the interval's half-width is 2.4 pp, so with this design (one reference run, two samples per problem) it could pass only if the estimate fell within ±0.6 pp. Per dataset (secondary): MATH500 +1.2 pp, GPQA +1.4 pp. Passes per token, engine/reference: 0.999 (within ±10%). The three engine seeds differ by up to 4.5 pp per benchmark; paired dataset results are in `tables/r1.tex`.
+**Verdict: equivalence not shown.** The pooled interval is [-1.1, +3.7] pp; the upper end is above +3 pp, on the side where the engine is more accurate; the lower end rules out an engine deficit larger than 1.1 pp. This is not evidence of a problem: with one reference run the interval's half-width is 2.4 pp, so the test could pass only if the estimate fell within ±0.6 pp. Per dataset: MATH500 +1.2 pp, GPQA +1.4 pp; passes per token, engine/reference: 0.999 (within); engine seeds differ by up to 4.5 pp.
 
 
 **Reproduce:** `./reproduce.sh accuracy`: 12–17 h, GPU; resumable groups; writes `data/r1/samples.csv` and `data/r1/runs.json`. `scripts/curate_r1.py` imports existing runs on CPU.
 
 ### Speed
 
-Workload: 128 requests, up to 4096 new tokens each, at most 64 resident; timings exclude load, capture and warmup. Peak memory: allocated for the engine, sampled device peak for the reference (roughly comparable).
+Workload: 128 requests, up to 4096 new tokens each, at most 64 resident; timings exclude load, capture and warmup.
 
 | Backend | Tokens/s | Speedup | Peak memory (GiB) |
 | --- | --- | --- | --- |
@@ -95,41 +125,23 @@ Workload: 128 requests, up to 4096 new tokens each, at most 64 resident; timings
 
 [Throughput figure](figures/throughput.pdf). In a profiled CUDA-graph step, kernels take 29.4 of 34.9 ms; the rest is launch and idle time.
 
-**Reproduce:** `./reproduce.sh speed`: 18–25 min, GPU; writes `data/speed.json`. `reference` refreshes the reference row (72–85 min, GPU).
+**Speed at 8192 tokens.** In the reproduction runs (chapter 2) answers may reach 8192 tokens; the engine then generates 693–1050 tokens/s on long-reasoning benchmarks, mainly because the KV cache fits only about 15 such requests at once instead of 64, and swapping costs the rest. The 20.7× speed-up was measured at 4096 tokens only. Code benchmarks run at 341–593 tokens/s.
 
-**Speed at 8192 tokens.** The speed figure above uses answers of up to 4096 tokens. In the reproduction runs (chapter 2) answers may reach 8192 tokens, and there the engine generates 693–1050 tokens/s on the long-reasoning benchmarks. The main reason is memory. The key/value cache (GPU memory holding what the model has already read for each request) fits only about 15 such long requests at once instead of 64, so fewer requests share each step. Moving paused requests to CPU memory and back (swapping) costs the rest. The 20.7× speed-up was measured at 4096 tokens only; the reference was not measured at 8192.
+**Reproduce:** `./reproduce.sh speed`: 18–25 min, GPU; writes `data/speed.json`. `reference` refreshes the reference row (72–85 min, GPU); `./reproduce.sh r2_speed` curates the long-answer metrics (seconds, CPU) into `data/r2_speed.json`.
 
-For HumanEval+/MBPP+, the engine generates 341–593 tokens/s. The code benchmarks are slower for a different reason: with the harness prompt their answers are short code without reasoning, so loading prompts and the last few unfinished requests take a larger share of the time.
+### Robustness and portability
 
-**Reproduce:** `./reproduce.sh r2_speed` curates the R2 job metrics (seconds, CPU) into `data/r2_speed.json`.
-
-### Robustness
-
-| Check | Requests | Total output tokens | Result / final cache state |
-| --- | --- | --- | --- |
-| Swap identity | 4 | 512 | PASS; clean |
-| Long generation | 128 | 675656 | PASS; clean |
-| Long + short prompts | 33 | 264 | PASS; clean |
-| Overflow restart | 6 | 72 | PASS; clean |
-
-Clean: every KV slot released, nothing swapped out. Stress generation allows 16384 tokens per request; the prompt test mixes a 16384-token prompt with short ones; the overflow test completes after 22 restarts. Overlap replays identical row sets with identical tokens, decisions and counts, including forced swap and restart.
-
-**Reproduce:** `./reproduce.sh robustness`: 25–30 min, GPU; writes `data/robustness.json`.
-
-### Portability
-
-Validated on an NVIDIA L40S-24Q (compute capability 8.9, driver 535, CUDA 12.8, torch 2.6.0+cu124): the default suite passed (208 passed, 16 skipped for missing development fixtures), eager and CUDA-graph runs of a 16-request smoke workload were identical, and overlap identity passed on 24 requests. This shows correctness on that machine, not bitwise equality across GPUs. Only the operator's summary is archived.
-
-**Reproduce:** `dev-guide/engine.md`, "Validating on a new GPU or machine"; `curate.py port` writes `data/port.json`.
+Robustness: stress, swap-identity, long-prompt and overflow-restart tests all pass and leave every KV slot released ([appendix](APPENDIX.md#robustness)). Portability: validated on an NVIDIA L40S-24Q (default suite 208 passed; eager and CUDA-graph runs identical), which shows correctness on that machine, not bitwise equality across GPUs ([appendix](APPENDIX.md#portability)).
 
 ## Limitations and negative results
 
-- Exact (level 0) checks do not cover the full model at full length (CPU compute).
-- `torch.compile` stays off: throughput changes by -2%, and parity is FAIL and greedy generation FAIL on the synthetic learned checkpoint (`./reproduce.sh negative`: 20–35 min, GPU).
-- A restart (host-swap overflow) discards work and may change sampled output; restarts per engine run: seed 42: 26, seed 1234: 18, seed 2024: 0.
-- R1 has one confirmatory reference run (2 samples per problem), whose sampling noise dominates the paired standard error.
-- Earlier exploratory runs exist outside this chapter and are not used.
-- Deviation: Engine seed 2024 was run through eval.py before the protocol runner existed (harness batch size 16 instead of 8, one engine job for both datasets); the engine backend ignores the batch size, other settings match.
+- **Accuracy equivalence is not established.** R1 is "equivalence not shown". A coupled accuracy test (±1 pp, same random numbers) was withdrawn before any data: coupled texts separate after a few dozen tokens, so paired outcomes are only weakly related and the test would need far more independent problems than the benchmarks hold. Level 2 concerns numerical error, not benchmark accuracy.
+- **Design history.** R1-O sizes and criteria were fixed or amended after diagnostic pilots and before any confirmatory data (no pilot effect estimate was used for sizing); the maximum rule was demoted after the pilot showed it cannot be calibrated. No criterion was re-run to obtain a pass.
+- **PyTorch bug.** PyTorch 2.6 (issue 143644) computes a wrong fp64 softmax on CUDA for some widths. It affected only the fp64 validity oracle and was worked around in the validation tools; the engine and the reference were untouched.
+- **Scope of C1.** C1 covers the first 512 generated tokens and prompts of at most 675 tokens; long contexts are covered by the per-step test (up to 8192 tokens).
+- **One platform.** All GPU evidence comes from one GPU type and software stack (NVIDIA GeForce RTX 3090).
+
+Further limitations (`torch.compile`, restarts, level 0 scope, checkpoints) are in the [appendix](APPENDIX.md#further-limitations).
 
 ## Reproduce and data
 
@@ -150,10 +162,11 @@ Steps and data files: [scripts/README.md](scripts/README.md#data-files).
 | Reference row | `reference` | `eval.py --backend tah` | 72–85 min / GPU | `speed.json` |
 | Speed, figure | `speed` | `engine_check` perf, profile | 18–25 min / GPU | `speed.json` |
 | Speed at long output cap | `r2_speed` | CPU curation of the R2 job metrics | seconds / CPU | `r2_speed.json` |
-| Host-swap memory A/B | `memory_ab` | `data/tmp/wp21/ab.py` A/B runs; `./reproduce.sh memory_ab` curation | 5–10 min / GPU; seconds / CPU | `memory_ab.json` |
+| Host-swap memory A/B | `memory_ab` | saved inputs in `data/engine/memory_ab/`; `./reproduce.sh memory_ab` curation | 5–10 min / GPU; seconds / CPU | `memory_ab.json` |
 | Level 1 | `equivalence` | `test_gtf`; cached replay; `generated_gtf`; `engine_check` gen | 2–4 h / GPU | `equivalence.json` |
 | Long context, sampler | `diagnostics` | `longctx.py` | 11–15 min / GPU | `diagnostics.json` |
-| Level 2 | `accuracy` | `run_protocol.py`; CSV curation | 12–17 h / GPU; resumable groups; CPU import | `r1/samples.csv`, `r1/runs.json` |
+| Level 2 (R1-O) | `r1o` | committed `script.tah.validation` commands; CPU `scripts/curate_r1o.py` | 6.08 h measured successful blocks (loading and gaps extra) / RTX 3090 24 GiB; CPU curation in seconds | `r1o.json` |
+| Level 3 (R1) | `accuracy` | `run_protocol.py`; CSV curation | 12–17 h / GPU; resumable groups; CPU import | `r1/samples.csv`, `r1/runs.json` |
 | Robustness | `robustness` | `engine_check` (four gates); restart test | 25–30 min / GPU | `robustness.json` |
 | Portability | operator | `dev-guide/engine.md` | target GPU | `port.json` |
 | Compile | `negative` | compiled `perf`, `gen`, `generated_gtf` | 20–35 min / GPU | `negative.json` |

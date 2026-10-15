@@ -9,6 +9,7 @@ R1 adapter imports the repository comparator and PyYAML from `.venv-tah`.
 ```bash
 python report/1-engine/analyze.py
 CUDA_VISIBLE_DEVICES='' .venv-tah/bin/python -B report/1-engine/scripts/check.py
+CUDA_VISIBLE_DEVICES='' .venv-tah/bin/python -B report/1-engine/scripts/check.py --r1o-sources
 bash report/1-engine/reproduce.sh
 bash report/1-engine/reproduce.sh equivalence --dry-run
 ```
@@ -23,11 +24,41 @@ previous corpus. Each subprocess keeps a log. Source inventories detect engine
 changes during a step; R1 also freezes the inventory across resumed invocations.
 No GPU reproduction was run while curating this chapter.
 
+`r1o` reruns the amended oracle study using the committed
+`script/tah/validation/{capture,analyze,near_tie,paired_look,coupled_run,short_c1}.py`
+commands, printed by `./reproduce.sh r1o --dry-run`. It uses the frozen
+`data/engine/oracle/wp23c/inputs/{manifest,c1-manifest,self-split}.json`, the
+checkpoint, and preserved launch history as external inputs. Full fresh outputs
+default to `data/tmp/report-1-engine/reproduction/r1o/`; `--output-root DIR`
+changes the parent.
+Existing roots are refused. Frozen inputs are hash-checked before execution;
+arithmetic/replay/OOM errors stop without retry. The measured fitting sizes are
+fp64 chunk 128, fp32 chunk 256, engine capture capacity 148000, resident 32,
+reference batch 8 and C1 oracle batch 4. Validity must pass before primary
+runs, and the new look files control independent continuation. The dry-run
+shows the observed branch (only the free-mode increment). If a new run calls
+for a forced increment, retain its outputs and extend aggregate mean collection
+before importing; the curator explicitly refuses to combine stage-1 means with
+expanded forced bounds.
+
+The measured successful blocks total 6.08 GPU hours on an RTX 3090 (24 GiB);
+the original chain occupied approximately 6 h 11 min including loading, analysis,
+the failed capacity launch and gaps. Per-phase successful-block times are in
+`r1o.json` and `tables/r1o_runtime.tex`; these are wall times, not CUDA event
+times. `scripts/curate_r1o.py [--source-root DIR]` curates saved evidence on CPU
+in seconds, idempotently; `analyze.py` uses only the curated aggregates for
+R1-O. It takes confirmatory 97.5% bounds and stopping decisions from the paired
+look files, never the legacy 95% maximum-rule conclusion. The secondary batch-1
+comparison retains its original descriptive 95% bounds. `check.py --r1o-sources`
+additionally checks every generated table cell against the original JSON files;
+plain `check.py` needs only the chapter data. The complete number-placeholder
+catalog with meanings is generated in `tables/r1o-analysis.json` for prose editing.
+
 The `exact` step is CPU only (tens of seconds). It runs the CPU model tests
 (`test_model.py`: the three tiny sets at atol = rtol = 0, the constructor
 variants) and the opt-in probes (`test_cpu_probes.py`: 8-token probes of the
 released checkpoint and of three full-size synthetic models, one 4096-token
-tiny probe). The tests write `data/engine/wp3/cpu-pytest/*.json`; the step
+tiny probe). The tests write CPU validation reports; the step
 refuses to run when its prerequisites are missing (tests would skip silently):
 the tiny fixtures `data/engine/fixtures/cpu-tiny` and models
 `data/engine/fixture-models/{tiny,full}` (from `tah.engine.generate_fixtures`,
@@ -81,10 +112,9 @@ paths. See [R1.md](R1.md) for the input contract.
 from `data/engine/paper_protocol_seed{42,1234,2024}` into `data/r2_speed.json`.
 It uses the same generated-tokens / generation-seconds definition as the
 chapter 2 run table; it runs on CPU in seconds. `memory_ab` reads the saved old
-and new comparisons in `data/tmp/wp21/gpu/`, using `data/tmp/wp21/ab.py compare`
-to refresh the comparison JSON files when needed, and writes
-`data/memory_ab.json`. The recorded A/B experiment takes 5–10 minutes on GPU;
-curating its saved results takes seconds on CPU.
+and new runs plus their comparison JSON files in `data/engine/memory_ab/` and
+writes `data/memory_ab.json`. The recorded A/B experiment takes 5–10 minutes on
+GPU; curating its saved results takes seconds on CPU.
 
 ## Data files
 
@@ -116,6 +146,16 @@ source paths.
   averaged across its three seeds, plus the approximate KV-capacity comparison.
 - `memory_ab.json`: old/new host-swap counters, output identity, swap time and
   host-memory growth for the 8 GiB and 0.5 GiB comparisons.
+- `r1o.json`: one aggregate study record: validity, forced errors and paired bias,
+  both binding tail looks with permanent success stops, descriptive maximum
+  rules, short coupled C1 and censoring, CPU self-split and composition
+  diagnostics, successful-block times and frozen source/checkpoint provenance.
+  Raw arrays stay at the source root named in `MANIFEST.json`. The manifest
+  hashes all imported summary JSON, run metadata, logs, frozen input manifests,
+  source inventories and the pre-fix launch history. It distinguishes file
+  SHA256 from the canonical JSON digest used by the C1 runner. Two removed
+  diagnostic modules retain their historical digests in the saved inventory;
+  their absence does not affect the scientific validation commands.
 
 ## Refreshing performance
 

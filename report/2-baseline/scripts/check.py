@@ -25,7 +25,7 @@ os.environ['CUDA_VISIBLE_DEVICES'] = ''
 os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
 ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parents[1]
-SCRATCH = REPO / 'data/tmp/wp25/checks/2-baseline'
+SCRATCH = REPO / 'data/tmp/report-2-baseline/checks'
 
 
 def snapshot():
