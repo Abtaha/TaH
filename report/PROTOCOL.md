@@ -70,6 +70,11 @@ Reference: Fu et al., *Think-at-Hard*, arXiv:2511.08577 (v4), §6.1 and Table 2 
 - Reported per benchmark: mean over seeds ± standard error (problem level, samples pooled over seeds), the 9-benchmark average, and the paper value. A benchmark is "reproduced" if the paper value lies inside our 95% confidence interval; otherwise the gap is reported. The paper's single-sample numbers carry roughly 2–3.5 points of standard error themselves.
 - The runnable form of this protocol is a protocol config under `script/tah/recipes/qwen3_1.7/`, executed by `script/tah/evaluation/run_protocol.py`.
 
+**Amendment (2026-10-14, after the seed-42 code results, before any run with the new prompt).** The harness's code prompt (TaH v1 harness, 2025-11) forces the answer to start with a code block (`reasoning=False`), so the model writes code without chain-of-thought. The paper states "pass@1 under a zero-shot CoT setting" and gives no code prompt. Under the harness prompt, MBPP+ scores 38.9 against the paper's 57.5 (Standard Qwen3-1.7B: 51.9). 51% of failures define the function under a different name than the test calls. The authors' later harness (`tah2/evaluate/codeeval.py`, 2026-10) uses benchmark-specific templates with chain-of-thought (`reasoning=True`; the MBPP template requires the function name and signature of the test cases). Therefore:
+1. The R2 runs above stay as registered; their HumanEval+/MBPP+ results are reported as "harness prompt".
+2. Additional runs: HumanEval+ and MBPP+ with the TaH2 code prompt (rendered identically to `tah2/evaluate/codeeval.py` with `reasoning=True`), otherwise the same settings (8192 tokens, 1 sample, temperature 0.6, top-p 0.95, top-k 20, same graders), seeds 42, 1234, 2024, same frozen engine.
+3. For HumanEval+ and MBPP+, the paper comparison (reproduced or gap) uses these TaH2-prompt runs. The harness-prompt results are reported alongside. The 9-benchmark average is reported both ways.
+
 ## Later checkpoints (e.g. RL-trained deciders)
 
 Evaluated with exactly the R2 protocol, the same seeds and the same frozen engine, and compared to the R2 baseline with the paired per-problem analysis of R1 (difference with confidence interval). They are not compared against reference-backend or paper numbers alone.

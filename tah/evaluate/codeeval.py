@@ -220,7 +220,10 @@ def evaluate(
                 if task_id not in problems:
                     warn(f"task {task_id} in samples but not in dataset")
                     continue
-                solution = sample.get("solution") or (problems[task_id]["prompt"] + sample["completion"])
+                # Key presence, as in EvalPlus and the TaH2 harness: an empty solution (no code
+                # extracted, e.g. a length-capped reasoning trace) is graded as a failure.
+                solution = (sample["solution"] if "solution" in sample
+                            else problems[task_id]["prompt"] + sample["completion"])
                 remaining.add(sample["_identifier"])
                 futures.append(executor.submit(
                     _check_correctness,
