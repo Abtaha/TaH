@@ -16,11 +16,13 @@ the tool. Run everything from the repository root with `source .venv-tah/bin/act
 | `engine_run.py` | `EngineRunner`: teacher-forced `TaHEngine.generate` (continuous admission, mixed depths) with forced tokens and, optionally, forced decisions. |
 | `capture.py` | CLI: one implementation over a manifest, block by block, writing `records/*.npz` and `run.json`; compares logits against a target. |
 | `analyze.py` | CLI: M1–M3, bias, no-large-error check, bootstrap ratios, oracle validity, secondary tables → `r1o1.json`, `r1o1.md`. |
+| `fp64_attention.py` | `fp64_attention_guard()`: float64 SDPA workaround for PyTorch #143644, applied by `ReferenceRunner` and the coupled oracle to every float64 run. |
 | `select_sequences.py` | CLI: deterministic sequence manifest from evaluation `samples.jsonl` files. |
 | `coupling.py` | `uniform(seed, index)`, `uniforms`, `inverse_cdf_draw`, `multinomial_patch` (R1-O2). |
 | `coupled_run.py` | Freeze harness prompts/seeds; resumable production engine, real reference b8, configurable oracle batch and shared harness grading. |
 | `coupled_analyze.py` | Paired C1 bootstrap, C2 TOST, trajectory identity/divergence and oracle CDF margins → `r1o2.json`, `r1o2.md`. |
 | `tests/test_validation.py` | CPU tests on the tiny fixture checkpoints. |
+| `tests/test_fp64_attention.py` | Workaround semantics against native CPU SDPA (masks, causal, GQA, fully masked rows), pass-through, restoration, runner/target guards; one CUDA check against CPU float64. |
 | `tests/test_coupled.py` | Batch/stream alignment, swap/restart, EOS, grading, fixed criteria and resumable CPU pipeline. |
 
 ## Validating a change
@@ -88,6 +90,43 @@ blocks are skipped) and refuses a different configuration; `--buffer-gb` (defaul
 bounds the transient dump in `--buffer-dir` (default `data/tmp/oracle-buffer`), and a
 block whose dump does not fit is replayed once per subset; `--keep-target` keeps the
 target model resident instead of loading it per comparison.
+
+The target was recorded in free mode and is replayed in that same mode. Only the
+implementation being measured has the oracle decisions imposed. Target replay still
+requires exact equality of visited passes, decisions, probabilities, top-1 IDs and
+gaps (matching NaNs allowed); its error reports each differing field, count, first
+index and finite maximum difference. No tolerance or retry-until-pass is used.
+A replay failure leaves the current block unwritten; completed blocks can be resumed.
+
+## Float64 attention on PyTorch 2.6 (#143644)
+
+PyTorch < 2.7 computes wrong, run-to-run variable float64 softmax on CUDA for odd
+widths 513–1023 not ≡ 31 (mod 32) over more than one row (`cunn_SoftMaxForward`
+reduces a negative `int` size modulo an unsigned block extent; fixed upstream in
+v2.7.0/v2.8.0). Float64 SDPA reaches it through the math kernel, so the
+unprotected float64 oracle has wrong attention. fp32/bf16/fp16 are not affected
+(they enter that kernel only above width 1024). `notes/tools/WP23/softmax_root_cause_probe.py`
+checks the trigger on the installed stack.
+
+Every float64 `ReferenceRunner.run` (oracle capture, target replay, diagnostics)
+and the float64 coupled oracle run inside `fp64_attention_guard()`. For an odd
+key/value length it adds one zero key/value slot masked with `-inf` (`False` for
+boolean masks; `is_causal`/no mask become explicit masks), so the softmax width is
+even and the freshly allocated score rows are aligned. The distribution over the
+real slots is unchanged; results agree with CPU float64 to rounding, not bitwise
+with native kernels. Other dtypes pass through untouched. A float64 run that
+never calls `F.scaled_dot_product_attention` raises. Float64 `run.json` configs
+record `fp64_attention`, so an old float64 directory cannot be resumed, and
+`capture.Target` refuses a float64 target that lacks it: recapture into a fresh directory.
+
+Check it with `tests/test_fp64_attention.py` on CPU, then once on the GPU:
+`CUDA_VISIBLE_DEVICES=0 python -m pytest -q script/tah/validation/tests/test_fp64_attention.py -k cuda`
+(seconds; also asserts that the native fault is still present on torch < 2.7).
+After a PyTorch upgrade to ≥ 2.8 the workaround becomes unnecessary but harmless; keep it until the oracle is recaptured.
+
+## Diagnosing an oracle replay failure
+
+If `capture.py` reports that a target recomputation does not reproduce its record, replay the shortest failing prefix in isolation (same frozen manifest and checkpoint, fresh output directory) and compare it bitwise across repeats and with CPU float64. The 2026-10-15 failure was PyTorch 2.6 bug #143644 (see above).
 
 ## Running R1-O2
 
@@ -193,8 +232,8 @@ prefix; they have no added near-tie cutoff. Length censoring has no observed mar
   Float64 SDPA uses the math kernel: keep the chunk at 128.
 - **Logit comparison.** A full-vocabulary oracle–implementation comparison cannot be
   stored (≈ 0.3 MB per position in bf16). The implementation dumps its native-dtype
-  logits for a subset of a block to a memmap; the target then recomputes those sequences
-  in its own layout with its recorded decisions forced (it must reproduce its record
+  logits for a subset of a block to a memmap; the target then replays those sequences
+  in its original free mode and chunk layout (it must reproduce its record
   bitwise) and reduces |x − o| per position. Blocks are replayed per subset; every
   replay's fingerprint must equal the first.
 - **Reference `generate` layout.** Built with `reference_capture.pack(prompt_lengths=…)`:

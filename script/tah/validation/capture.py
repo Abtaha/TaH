@@ -27,6 +27,7 @@ import torch
 
 from .common import (DTYPES, LogitDump, dump_subsets, effective_threshold, fingerprint, load_manifest, load_record,
                      load_reference, model_sha256, record_path, save_record, select, write_json)
+from .fp64_attention import POLICY as FP64_ATTENTION_POLICY
 from .reference_run import ReferenceRunner
 
 
@@ -98,6 +99,9 @@ class Target:
         cfg = self.info["config"]
         if cfg["impl"] != "reference" or cfg["mode"] != "free" or cfg["layout"] != "chunk":
             raise ValueError("a target must be a free-mode reference run in the chunk layout")
+        if cfg.get("dtype") == "fp64" and cfg.get("fp64_attention") != FP64_ATTENTION_POLICY:
+            raise ValueError(f"{self.dir}: float64 oracle captured without the PyTorch #143644 attention "
+                             f"workaround ({FP64_ATTENTION_POLICY}); its attention may be wrong, recapture it")
         self.device = device
         self.model = None
 
@@ -244,6 +248,8 @@ def main(argv=None):
                   if args.eval_config else None)
     if args.sequence_order != "manifest":
         config["sequence_order"] = args.sequence_order
+    if config["dtype"] == "fp64":
+        config["fp64_attention"] = FP64_ATTENTION_POLICY  # ReferenceRunner applies it to every fp64 run
     # --keep-target only changes memory placement, not results; it is not part of the configuration.
     run_path = args.out / "run.json"
     info = json.loads(run_path.read_text()) if run_path.exists() else None

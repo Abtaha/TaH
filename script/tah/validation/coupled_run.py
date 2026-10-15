@@ -11,6 +11,7 @@ engine baseline RSS + 8 GiB. ``run reference``/``run oracle`` pin no swap arena.
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -22,6 +23,7 @@ import torch
 
 from .common import T, TOP_K, TOP_P, load_reference, model_sha256, write_json
 from .coupling import multinomial_patch, uniforms
+from .fp64_attention import POLICY as FP64_ATTENTION_POLICY, fp64_attention_guard
 
 SEED = 42
 THRESHOLD = 0.8984375
@@ -238,6 +240,8 @@ def run(args):
                                       max_batch_size=min(64, args.block)))
     if short:
         config["subset"] = subset
+    if config["dtype"] == "fp64":
+        config["fp64_attention"] = FP64_ATTENTION_POLICY
     from .capture import environment
     config["environment"] = environment()
     out = args.out
@@ -319,8 +323,9 @@ def run(args):
                 peak_gpu_reserved_bytes=torch.cuda.max_memory_reserved(model.device)
                 if model.device.type == "cuda" else 0)
         else:
-            results, traces = reference_batch(model, tokenizer, block, manifest["pad_token_id"],
-                                              args.max_new_tokens, args.implementation == "oracle")
+            with fp64_attention_guard() if model.dtype == torch.float64 else nullcontext():
+                results, traces = reference_batch(model, tokenizer, block, manifest["pad_token_id"],
+                                                  args.max_new_tokens, args.implementation == "oracle")
             for r, trace in zip(results, traces):
                 if args.implementation == "oracle":
                     target = trace_path(out, r["id"])

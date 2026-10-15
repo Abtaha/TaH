@@ -20,6 +20,7 @@ import torch
 from tah.engine.reference_capture import pack
 
 from .common import Recorder, effective_threshold, inputs_of, reference_distribution, top_gap
+from .fp64_attention import fp64_attention_guard
 
 
 class ReferenceRunner:
@@ -29,12 +30,27 @@ class ReferenceRunner:
         self.max_iter = model.max_iter
         self.threshold = effective_threshold(self.decider)
 
-    @torch.no_grad()
-    def run(self, seqs, *, layout, chunk=256, pad_id=0, forced=None, consumer=None,
-            distribution=reference_distribution):
-        """Return one Recorder per sequence.
+    def run(self, seqs, **kwargs):
+        """Return one Recorder per sequence (keyword arguments: ``_run``).
 
-        forced: per sequence a bool array [max_iter, L] of decisions to impose, or None.
+        A float64 model runs inside ``fp64_attention_guard`` (PyTorch #143644); every
+        such run must route attention through it.
+        """
+        if self.model.dtype != torch.float64:
+            return self._run(seqs, **kwargs)
+        with fp64_attention_guard() as guard:
+            before = guard.calls
+            recorders = self._run(seqs, **kwargs)
+        if guard.calls == before:
+            raise AssertionError("float64 reference attention bypassed F.scaled_dot_product_attention; "
+                                 "the PyTorch #143644 workaround did not apply")
+        return recorders
+
+    @torch.no_grad()
+    def _run(self, seqs, *, layout, chunk=256, pad_id=0, forced=None, consumer=None,
+             distribution=reference_distribution):
+        """forced: per sequence a bool array [max_iter, L] of decisions to impose, or None.
+
         consumer(seq, generated_indices, logits): sees every generated position's final
         logits (model dtype) once, e.g. to dump or compare them.
         """
