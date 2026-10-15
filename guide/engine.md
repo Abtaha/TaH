@@ -39,6 +39,9 @@ can differ. The call blocks and cannot be nested or run concurrently on one engi
 An exception raised by a callback propagates after the request's KV and host swap
 memory are released.
 
+`close()` releases the engine's pinned host swap arena (see [memory notes](#scheduling-memory-and-long-generations));
+`TaHEngine` is also a context manager that closes on exit.
+
 A request is a token-ID list, a raw string, or `Request(prompt, max_new_tokens=1024,
 seed=0)`. Strings are tokenized with the checkpoint's `tokenizer.json`; apply the
 chat template yourself, as the example does. Plain strings and lists use the
@@ -66,7 +69,7 @@ Keyword arguments of `TaHEngine`. The first argument is the checkpoint path, and
 | `memory_fraction` | 0.9 | Fraction of free GPU memory (after weights) reserved for KV and workspaces. |
 | `kv_capacity` | `None` | KV entries (page size 1). `None` sizes them automatically; a larger-than-safe value is rejected. |
 | `admission_headroom` | 0.1 | Fraction of KV slots kept free after a new prompt's worst case. |
-| `host_swap_bytes` | 8 GiB | Pinned host budget for swapped state. Overflow restarts a request; 0 disables swapping. |
+| `host_swap_bytes` | 8 GiB | Host RAM for swapped state, allocated and pinned in full at startup (exact, fixed for the engine's lifetime). Overflow restarts a request; 0 disables swapping. |
 | `max_new_tokens` | 1024 | Cap for plain string and token-list requests. |
 | `seed` | 0 | Base seed for plain requests. |
 | `eos_token_id` | `"tokenizer"` | Read EOS from the tokenizer; an integer overrides it; `None` disables EOS stops. |
@@ -87,7 +90,7 @@ When growth runs out of KV slots, the newest resident request is swapped to pinn
 memory with its KV, cumulative logits, next input and RNG state. Swapped requests
 resume first-in first-out, and new admission waits while any request is swapped.
 
-If a swap would exceed `host_swap_bytes`, the newest active request (resident or
+If a swap does not fit the free space of the host swap arena, the newest active request (resident or
 swapped) discards its unfinished output and restarts from its original prompt and
 seed. Its index is kept and only the final attempt produces a result. A restart
 changes the batch composition, so a restarted sample can differ from an unrestarted
@@ -99,7 +102,21 @@ Memory notes:
 - Each KV entry is 112 KiB for the 28-layer 1.7B checkpoint. Prompt and generated
   passes share the GPU pool.
 - `engine.memory_budget` reports the free memory measured at startup, the
-  reservations (KV, attention workspaces, graphs) and the resulting capacity.
+  reservations (KV, attention workspaces, graphs) and the resulting capacity;
+  `memory_budget.host_swap` reports the host swap arena.
+- The host swap arena is exactly `host_swap_bytes` of pinned RAM, reserved when the
+  engine starts and held until `engine.close()` (or the end of a
+  `with TaHEngine(...) as engine:` block, or deleting the engine); swapping allocates
+  nothing else. Every engine pins its own arena, so close one before creating the next
+  in the same process. A closed engine cannot generate. If
+  the RAM cannot be pinned, the engine fails at startup with an error naming the
+  budget. It is used in pages of `swap_chunk_entries` KV entries (28 MiB for the 1.7B
+  checkpoint); a swapped request takes whole pages, so a budget remainder smaller
+  than one page is never used.
+- RAM planning: process RSS ≈ baseline + `host_swap_bytes`. Measure the baseline once
+  with the same configuration and `host_swap_bytes=0` (`--engine-host-swap-gib 0` in
+  the harness), as the peak RSS of the engine process, e.g. `VmHWM` in
+  `/proc/<pid>/status`. Grading workers are separate processes with their own RSS.
 - Startup captures take time that grows with the resident cap. Create one engine and
   reuse it for all datasets.
 

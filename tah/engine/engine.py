@@ -23,6 +23,7 @@ from .attention import AttentionRow, DecodeBucket, static_plan_integer_bytes
 from .kv_cache import KVCapacityError, SlotPool
 from .model import EagerTaHModel
 from .sampling import GraphSampler, RequestRNG, SamplingParams
+from .host_arena import HostArena
 from .scheduler import HostSwap, HostSwapOverflow, Request, Result, State
 from .tensors import upload
 from .graphs import DecodeGraphs, batch_sizes
@@ -200,6 +201,8 @@ class TaHEngine:
         # runs one more discarded "ghost" row before release).
         self._ghost_lag = False
         self.last_run = {}
+        # Exactly host_swap_bytes, pinned once; probe and final runtimes share it.
+        self.host_arena = HostArena(host_swap_bytes, self.device)
         probe = None
         if self.cuda_graphs:
             # Measure the same model/step shapes with a tiny scratch KV pool.
@@ -241,6 +244,8 @@ class TaHEngine:
             reservations=reserves, kv_capacity=kv_capacity, kv_bytes=kv_capacity * slot_bytes,
             metadata_budget_bytes=kv_capacity * 44, host_flashinfer_workspace_bytes=static_integer_bytes if self.device.type == 'cuda' else 0)
         self._allocate_runtime(kv_capacity, host_swap_bytes, swap_chunk_entries)
+        self.memory_budget['host_swap'] = dict(arena_bytes=self.swap.budget_bytes, pinned=self.host_arena.pinned,
+            page_bytes=self.swap.page_bytes, pages=self.swap.pages)
         if self.cuda_graphs:
             self.graphs.capture(self)
             self.memory_budget['graph_probe'] = probe
@@ -256,6 +261,24 @@ class TaHEngine:
                 seconds=self.compiled_step.compile_seconds,
                 graphs=self.compiled_step.compile_graphs)
 
+    def close(self):
+        """Release the pinned host swap arena now; the engine cannot generate afterwards.
+
+        Dropping the last reference also releases it (finalizer), but only when the
+        engine object is actually freed; use close() or ``with TaHEngine(...)`` when
+        several engines are created in one process. GPU memory is released when the
+        engine is deleted.
+        """
+        if self._busy:
+            raise RuntimeError('cannot close TaHEngine during generate')
+        self.host_arena.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
     def _release_runtime(self):
         self.buckets.clear()
         for name in self._runtime_attributes:
@@ -269,7 +292,7 @@ class TaHEngine:
         v, h = cfg['vocab_size'], cfg['hidden_size']
         self.pool = SlotPool(kv_capacity, n, cfg['num_key_value_heads'], cfg['head_dim'],
                              self.model.max_iter, device=self.device, trash_slot=self.overlap)
-        self.swap = HostSwap(self.pool, host_swap_bytes, swap_chunk_entries)
+        self.swap = HostSwap(self.pool, host_swap_bytes, swap_chunk_entries, self.host_arena)
         self.decode_workspace = self.prefill_workspace = None
         if self.device.type == 'cuda':
             self.decode_workspace = torch.empty(128 * 1024**2, dtype=torch.uint8, device=self.device)
@@ -429,8 +452,8 @@ class TaHEngine:
         wasted = len(state.generated)
         if was_swapped:
             # An overflow can follow a swap issued in this very preemption
-            # loop. Finish its D2H transfer before dropping the pinned payload
-            # and making its budget available for another snapshot.
+            # loop. Finish its D2H transfer before dropping the snapshot. Page
+            # reuse alone would not need this wait (copies are stream-ordered).
             if state.snapshot.event is not None:
                 state.snapshot.event.synchronize()
             swapped.remove(state)
@@ -770,6 +793,8 @@ class TaHEngine:
         """
         if self._busy:
             raise RuntimeError('TaHEngine.generate is not reentrant')
+        if self.host_arena.closed:
+            raise RuntimeError('TaHEngine is closed')
         states = self._requests(list(requests), sampling or SamplingParams())
         self._busy = True
         waiting, swapped, running, restarted = deque(states), deque(), [], []
@@ -867,7 +892,8 @@ class TaHEngine:
                             state.position += 1
             self.last_run.update(wall_seconds=time.perf_counter() - started,
                 generated_tokens=sum(len(r.token_ids) for r in results),
-                host_swap_peak_bytes=self.swap.peak_bytes, free_rows=len(free_rows))
+                host_swap_peak_bytes=self.swap.peak_bytes,
+                host_swap_arena_bytes=self.swap.budget_bytes, free_rows=len(free_rows))
             assert len(free_rows) == len(set(free_rows)) == self.max_batch_size
             if self.compiled_step is not None:
                 self.last_run['compile'] = dict(enabled=True, cache_dir=self.compiled_step.cache_dir,

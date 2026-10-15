@@ -106,10 +106,13 @@ sum the duplicated copies. Key fields:
   extraction (EvalPlus sanitize or the `tah2` block extraction) runs in the workers and is
   counted in `grading_work_seconds`; without workers it runs inline in the callback.
 - `engine_options`: the effective options, including the resident cap.
-- `memory_budget`: startup KV reservations and graph capture memory.
+- `memory_budget`: startup KV reservations, graph capture memory and the host swap
+  arena (`host_swap`: `arena_bytes`, `page_bytes`, `pages`, `pinned`).
 - `engine_run`: `generation_seconds`, `callback_seconds`, `generated_tokens`, `swaps`,
   `restarts`, `wasted_tokens`, `blocked_restart_admission_steps`, `free_rows`,
-  `overlap`, `ghost_rows`, `overlap_drains`, `graph_steps`, `eager_steps`, and
+  `overlap`, `ghost_rows`, `overlap_drains`, `graph_steps`, `eager_steps`,
+  `host_swap_arena_bytes` (reserved arena), `host_swap_peak_bytes` (peak arena bytes held
+  by swapped requests, in whole pages, over the engine's lifetime), and
   `peak_gpu_allocated_bytes` / `peak_gpu_reserved_bytes` (PyTorch peaks after warmup).
 - `run_status.code_grading_seconds` for code grading.
 

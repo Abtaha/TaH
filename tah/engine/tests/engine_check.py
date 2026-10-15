@@ -203,6 +203,16 @@ def parity(args):
     return report
 
 
+# Host swap arena for gates whose swaps are bounded: smoke and overlap-identity run at
+# most 16 resident W-smoke requests (prompt <= 347 tokens, cap <= 1024, max_iter 2:
+# <= 2742 entries = 0.29 GiB each, <= 44k in all, far below the full pool), so they
+# never swap naturally; swap, phase-profile and overlap-identity force one swap of one
+# such request. Gates that can
+# swap naturally (workload, parity, profile, overlap) keep the production 8 GiB.
+# The arena is pinned at engine construction; each gate builds one engine.
+BOUNDED_SWAP_BYTES = 1024**3
+
+
 def workload_prompts(model_path='models/TaH-plus-1.7B', repeat=2):
     baseline = Path('data/engine/wperf_bs16/math500_tah/20261011_155619/TASK_0_64/samples.jsonl')
     if baseline.exists():
@@ -271,7 +281,7 @@ def swap_check(args):
     prompts = workload_prompts(args.model_path)[:4]
     override = yaml.safe_load(Path('script/tah/recipes/qwen3_1.7/eval_tah.yaml').read_text())
     engine = TaHEngine(args.model_path, override, max_batch_size=4, kv_capacity=10000,
-                      swap_chunk_entries=7, prefill_chunk_size=128, cuda_graphs=args.cuda_graphs,
+                      host_swap_bytes=BOUNDED_SWAP_BYTES, swap_chunk_entries=7, prefill_chunk_size=128, cuda_graphs=args.cuda_graphs,
                       compile=args.compile, compile_cache_dir=args.compile_cache_dir,
                       graph_batch_sizes=args.graph_batch_sizes, overlap=args.overlap)
     params = SamplingParams(temperature=.6, top_k=20, top_p=.95)
@@ -321,7 +331,8 @@ def smoke(args):
     engine = TaHEngine(args.model_path, override, max_batch_size=args.batch_size,
                       memory_fraction=args.memory_fraction, cuda_graphs=args.cuda_graphs,
                       compile=args.compile, compile_cache_dir=args.compile_cache_dir,
-                      graph_batch_sizes=args.graph_batch_sizes, overlap=args.overlap)
+                      graph_batch_sizes=args.graph_batch_sizes, overlap=args.overlap,
+                      host_swap_bytes=BOUNDED_SWAP_BYTES)
     requests = [Request(p, 1024, i) for i, p in enumerate(prompts)]
     params = SamplingParams(temperature=.6, top_k=20, top_p=.95)
     decisions = []
@@ -355,7 +366,7 @@ def overlap_identity(args):
     from tah.engine.tests.overlap_replay import assert_same_execution, overlap_vs_replay
     prompts = workload_prompts(args.model_path, repeat=1)[:24]
     override = yaml.safe_load(Path('script/tah/recipes/qwen3_1.7/eval_tah.yaml').read_text())
-    engine = TaHEngine(args.model_path, override, max_batch_size=16,
+    engine = TaHEngine(args.model_path, override, max_batch_size=16, host_swap_bytes=BOUNDED_SWAP_BYTES,
                       memory_fraction=args.memory_fraction, cuda_graphs=args.cuda_graphs,
                       compile=args.compile, compile_cache_dir=args.compile_cache_dir,
                       graph_batch_sizes=args.graph_batch_sizes, overlap=True)
@@ -401,7 +412,7 @@ def phase_profile(args):
     prompts = workload_prompts(args.model_path)[:4]
     override = yaml.safe_load(Path('script/tah/recipes/qwen3_1.7/eval_tah.yaml').read_text())
     engine = TaHEngine(args.model_path, override, max_batch_size=4, kv_capacity=10000,
-                      swap_chunk_entries=256, cuda_graphs=args.cuda_graphs,
+                      host_swap_bytes=BOUNDED_SWAP_BYTES, swap_chunk_entries=256, cuda_graphs=args.cuda_graphs,
                       compile=args.compile, compile_cache_dir=args.compile_cache_dir,
                       graph_batch_sizes=args.graph_batch_sizes, overlap=args.overlap)
     requests = [Request(p, 48, i) for i, p in enumerate(prompts)]

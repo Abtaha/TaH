@@ -9,7 +9,8 @@ repository root with `source .venv-tah/bin/activate`.
 | Module | Role |
 | --- | --- |
 | `engine.py` | `TaHEngine`: admission, swap and restart, overlap pipeline, `last_run` metrics. |
-| `scheduler.py` | `Request`, `Result`, per-request state. |
+| `scheduler.py` | `Request`, `Result`, per-request state, paged `HostSwap`. |
+| `host_arena.py` | `HostArena`: the fixed host swap buffer, pinned once with `cudaHostRegister`. |
 | `kv_cache.py` | `SlotPool`: page-size-one KV storage, request tables, snapshots, audit. |
 | `attention.py`, `attention_kernels.py` | FlashInfer decode/prefill buckets and Triton table kernels. |
 | `graphs.py` | CUDA graph capture per exact batch size. |
@@ -398,6 +399,49 @@ rotary=None)` runs one pass per row, across requests and depths. It writes K/V f
 layer and returns pass-local `logits` increments and `hidden_states`. The caller
 accumulates logits and handles continuation decisions. Dynamic and LongRoPE scaling need
 frequency planning outside capture and precomputed `(cos, sin)` through `rotary`.
+
+## Host swap arena
+
+`HostArena` holds exactly `host_swap_bytes`. It is a plain host tensor pinned in place
+with `cudaHostRegister`, not `torch.empty(pin_memory=True)`: PyTorch's caching host
+allocator rounds blocks up to powers of two and keeps freed blocks cached, so per-swap
+pinned tensors grew RSS far past the budget. The engine creates the arena once; the graph
+probe and the final runtime share it. `HostSwap` splits it into pages of
+`swap_chunk_entries` KV entries (`page_bytes = chunk × entry bytes`).
+`TaHEngine.close()` (also `__exit__`) unpins and frees it at once; otherwise a
+`weakref.finalize` does so when the arena is collected. `TaHEngine` has no reference
+cycle, so `del engine` releases it without a gc pass, but wrappers that patch closures
+onto the engine (`EngineRunner`) do form cycles and must call `close()`. Tests and
+gates that do not size the arena on purpose pass small budgets (`TINY_SWAP_BYTES` in
+`test_engine_gpu.py`, `BOUNDED_SWAP_BYTES` in `engine_check.py`); keep it that way, since
+every engine pins its budget at construction.
+
+- **Layout.** A snapshot is one byte stream over its pages: KV chunk k (contiguous
+  `[layers, 2, n, 1, heads, dim]`) fills page k, then the row payload (logits,
+  embeddings, seed, counter) follows as raw bytes and may cross into one more page.
+  Each copy is contiguous to contiguous, so it is one direct DMA without temporaries.
+- **Accounting.** A snapshot needs `ceil((entries × entry_bytes + payload) / page_bytes)`
+  pages; `out` raises `HostSwapOverflow` exactly when fewer pages are free, before
+  changing any state. Pages are interchangeable, so there is no external
+  fragmentation. `used_bytes`/`peak_bytes` count whole pages.
+- **Reuse without host sync.** During generation the host never reads or writes arena
+  bytes. Pages are written only by swap-out D2H copies and read only by restore H2D
+  copies, all on the engine's single CUDA stream. A page freed by `restore` or `discard`
+  can still have a copy in flight; the next operation on it is a later swap-out copy
+  on the same stream, which runs after every earlier operation of that stream. This
+  covers the overlap pipeline (swaps between launch and consume of a step) and discard
+  of a swapped request (a restart or a finish during the lag): the `event.synchronize()`
+  calls on those discard paths predate the arena and are not needed for page reuse.
+  Restore still issues the device-side `wait_event` on the snapshot event.
+- **Slot indices.** Gather and scatter indices come from the pool's device stream
+  tables (`SlotPool.slot_ids`), already written in stream order by `allocate`/`reserve`;
+  there is no per-swap host index upload or staging buffer.
+- **Validating a change.** CPU: `python -m pytest -q tah/engine/tests/test_host_swap.py`
+  (page edges, fragmentation, bit-exact round trip, budget 0, no pinned or host
+  allocation after construction) and `test_engine.py`. GPU: `engine_check --gate swap`
+  and `--gate overlap-identity`, `test_engine_gpu.py`, and `--gate phase-profile` for
+  swap-out and restore time. Process RSS must stay flat at baseline + budget
+  (`VmRSS` in `/proc/<pid>/status`) during a swap-heavy run.
 
 ## Overlap internals
 

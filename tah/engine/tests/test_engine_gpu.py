@@ -11,6 +11,10 @@ from tah.engine.kv_cache import SlotPool
 from tah.engine.tests.test_model import reference
 
 pytestmark = [pytest.mark.gpu, pytest.mark.skipif(os.environ.get('CUDA_VISIBLE_DEVICES') == '' or not torch.cuda.is_available(), reason='CUDA required')]
+# Tests that do not size the host arena on purpose: at most 2 snapshots of a
+# 400-entry pool of 2 KiB entries (1.6 MB), so it never overflows. The arena is
+# pinned at construction; the most simultaneous engines in one test is two.
+TINY_SWAP_BYTES = 4 * 1024**2
 
 
 def test_cuda_overflow_restart_repeated_completion_and_cleanup(tmp_path):
@@ -96,7 +100,7 @@ def test_cuda_engine_forced_swap_and_single_sync(tmp_path, monkeypatch):
     cfg['max_position_embeddings'] = 256
     (tmp_path / 'config.json').write_text(json.dumps(cfg))
     torch.set_num_threads(2)
-    eng = TaHEngine(tmp_path, max_batch_size=3, kv_capacity=128,
+    eng = TaHEngine(tmp_path, host_swap_bytes=TINY_SWAP_BYTES, max_batch_size=3, kv_capacity=128,
                     prefill_chunk_size=2, swap_chunk_entries=2, eos_token_id=None, overlap=False)
     requests = [Request([3, 7], 8, 81), Request([5, 8], 8, 12)]
     params = SamplingParams(temperature=.6, top_k=20, top_p=.95)
@@ -163,7 +167,7 @@ def test_cuda_engine_forced_swap_and_single_sync(tmp_path, monkeypatch):
 def test_compile_fullgraph_eager_and_cuda_graph_identity(tmp_path):
     reference(tmp_path, max_iter=3, label=False, head_dim=128)
     torch.set_num_threads(2)
-    eng = TaHEngine(tmp_path, max_batch_size=3, kv_capacity=256,
+    eng = TaHEngine(tmp_path, host_swap_bytes=TINY_SWAP_BYTES, max_batch_size=3, kv_capacity=256,
                     prefill_chunk_size=2, eos_token_id=None,
                     graph_batch_sizes=[1, 2, 3], compile=True,
                     compile_cache_dir=tmp_path / 'inductor-cache')
@@ -205,7 +209,7 @@ def test_graph_shared_pool_arbitrary_order_rotary_params_and_fallback(tmp_path, 
         cfg['original_max_position_embeddings'] = 4
     (tmp_path / 'config.json').write_text(json.dumps(cfg))
     torch.set_num_threads(2)
-    eng = TaHEngine(tmp_path, max_batch_size=3, kv_capacity=256, prefill_chunk_size=2,
+    eng = TaHEngine(tmp_path, host_swap_bytes=TINY_SWAP_BYTES, max_batch_size=3, kv_capacity=256, prefill_chunk_size=2,
                     eos_token_id=None, graph_batch_sizes=[1, 3], overlap=False)
     assert set(eng.graphs.info['batch_sizes']) == {1, 3}
     assert eng.memory_budget['reservations']['cuda_graphs'] >= eng.graphs.info['private_reserved_bytes']
@@ -243,7 +247,7 @@ def test_graph_shared_pool_arbitrary_order_rotary_params_and_fallback(tmp_path, 
 def test_graph_natural_swap_fifo_admission_identity(tmp_path):
     reference(tmp_path, max_iter=3, label=False, head_dim=128)
     torch.set_num_threads(2)
-    eng = TaHEngine(tmp_path, max_batch_size=3, kv_capacity=50, prefill_chunk_size=2,
+    eng = TaHEngine(tmp_path, host_swap_bytes=TINY_SWAP_BYTES, max_batch_size=3, kv_capacity=50, prefill_chunk_size=2,
                     swap_chunk_entries=3, eos_token_id=None, overlap=False)
     requests = [Request([3, 7], 12, i) for i in range(4)]
     params = SamplingParams(temperature=0)
@@ -280,7 +284,7 @@ def overlap_checkpoint(tmp_path, threshold=.5):
 def test_cuda_overlap_identity_swap_restart_graph_and_eager(tmp_path):
     from tah.engine.tests.overlap_replay import assert_same_execution, overlap_vs_replay
     overlap_checkpoint(tmp_path)
-    eng = TaHEngine(tmp_path, max_batch_size=3, kv_capacity=400, prefill_chunk_size=2,
+    eng = TaHEngine(tmp_path, host_swap_bytes=TINY_SWAP_BYTES, max_batch_size=3, kv_capacity=400, prefill_chunk_size=2,
                     swap_chunk_entries=3, eos_token_id=None, overlap=True)
     requests = [Request([3 + i, 7, 9][:1 + i % 3], 10 + 3 * (i % 4), 40 + i) for i in range(7)]
     params = SamplingParams(temperature=1.0, top_k=8, top_p=.95)
@@ -335,7 +339,7 @@ def test_cuda_overlap_overflow_restart_and_single_sync(tmp_path):
     # Sync audit: iterations without admission contain at most ONE blocking
     # wait (the lagged status event) and no hidden scalar reads.
     eng._step_hook = None
-    big = TaHEngine(tmp_path, max_batch_size=3, kv_capacity=400, prefill_chunk_size=2,
+    big = TaHEngine(tmp_path, host_swap_bytes=TINY_SWAP_BYTES, max_batch_size=3, kv_capacity=400, prefill_chunk_size=2,
                     eos_token_id=None, overlap=True)
     from torch.profiler import record_function
     iteration, prefill = big._overlap_iteration, big._prefill
@@ -371,3 +375,29 @@ def test_cuda_overlap_overflow_restart_and_single_sync(tmp_path):
         assert not [e for e in inside if e.name != 'cudaEventSynchronize'], [e.name for e in inside]
         checked += 1
     assert checked >= 10 and big.last_run['graph_steps'] == big.last_run['steps']
+
+
+def test_cuda_arena_close_and_del_unpin(tmp_path):
+    import gc
+    import weakref
+    reference(tmp_path, max_iter=3, label=False, head_dim=128)
+    with TaHEngine(tmp_path, max_batch_size=3, kv_capacity=50, eos_token_id=None,
+                   host_swap_bytes=TINY_SWAP_BYTES, overlap=False) as eng:
+        buffer = eng.host_arena.buffer
+        assert buffer.is_pinned() and buffer.numel() == TINY_SWAP_BYTES
+        eng.generate([Request([3, 7], 2, 0)], dict(temperature=0))
+    assert not buffer.is_pinned() and eng.host_arena.buffer is None  # unregistered by close()
+    with pytest.raises(RuntimeError, match='closed'):
+        eng.generate([Request([3, 7], 2, 0)], dict(temperature=0))
+    eng.close()  # idempotent
+    gc.collect()
+    gc.disable()
+    try:
+        eng = TaHEngine(tmp_path, max_batch_size=3, kv_capacity=50, eos_token_id=None,
+                        host_swap_bytes=TINY_SWAP_BYTES, overlap=True)
+        eng.generate([Request([3, 7], 2, 0)], dict(temperature=0))
+        buffer, arena = eng.host_arena.buffer, weakref.ref(eng.host_arena)
+        del eng  # no reference cycle: the finalizer unpins without a gc pass
+        assert arena() is None and not buffer.is_pinned()
+    finally:
+        gc.enable()
