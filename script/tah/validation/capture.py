@@ -7,8 +7,8 @@
 
 Forced mode imposes the target's decisions and measures full-vocabulary logit errors
 against the target: the implementation's native-dtype logits at generated positions
-are dumped to a transient memmap, then the target (oracle) recomputes each sequence
-with its own decisions and reduces |x - o| per position. When a block's dump exceeds
+are dumped to a transient memmap, then the target (oracle) replays each sequence
+in its original free mode and reduces |x - o| per position. When a block's dump exceeds
 the buffer budget the block is replayed once per subset; every replay must reproduce
 the first one bitwise (checked by fingerprint). Completed blocks are skipped on rerun.
 """
@@ -116,7 +116,13 @@ class Target:
         free_memory()
 
     def compare(self, seqs, dump, arrays):
-        """Recompute each sequence with the target's own decisions; fill sq/maxabs."""
+        """Replay the original free oracle exactly; check identity and fill sq/maxabs.
+
+        Forcing recorded decisions is a different execution path: it allocates a
+        replacement device decision tensor in every hook. Even equal decisions
+        do not establish identical floating-point execution. The implementations
+        being measured still have the recorded oracle decisions imposed.
+        """
         cfg = self.info["config"]
         runner = self.load()
         for seq in seqs:
@@ -132,12 +138,36 @@ class Target:
                 sq[start:end] = d.square().sum(-1).cpu().numpy()
                 maxabs[start:end] = d.abs().amax(-1).cpu().numpy()
             rec = runner.run([seq], layout="chunk", chunk=cfg["chunk"], pad_id=0,
-                             forced=[reference["decision"]], consumer=consume)[0].arrays()
-            same = all(np.array_equal(rec[k], reference[k], equal_nan=k in ("prob", "gap"))
-                       for k in ("visited", "decision", "prob", "top1", "gap"))
-            if not same:
+                             consumer=consume)[0].arrays()
+            differences = replay_differences(reference, rec)
+            if differences:
                 raise AssertionError(f"{seq['id']}: target recomputation does not reproduce its record "
-                                     "(nondeterministic oracle?)")
+                                     f"(strict oracle replay failed): {json.dumps(differences, sort_keys=True)}")
+
+
+def replay_differences(reference, replay):
+    """Compact exact mismatch diagnostics; no numerical acceptance tolerance."""
+    differences = {}
+    for key in ("visited", "decision", "prob", "top1", "gap"):
+        expected, actual = reference[key], replay[key]
+        if expected.shape != actual.shape:
+            differences[key] = dict(expected_shape=list(expected.shape), actual_shape=list(actual.shape))
+            continue
+        same = expected == actual
+        if key in ("prob", "gap"):
+            same |= np.isnan(expected) & np.isnan(actual)
+        if same.all():
+            continue
+        where = ~same
+        first = tuple(np.argwhere(where)[0])
+        row = dict(count=int(where.sum()), first_index=[int(i) for i in first],
+                   expected=float(expected[first]), actual=float(actual[first]))
+        if key in ("prob", "gap"):
+            finite = where & np.isfinite(expected) & np.isfinite(actual)
+            row["max_abs_finite_difference"] = float(np.abs(expected[finite]-actual[finite]).max()) if finite.any() else None
+            row["nonfinite_mismatches"] = int((where & ~finite).sum())
+        differences[key] = row
+    return differences
 
 
 def blocks_of(args, seqs):

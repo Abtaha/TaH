@@ -282,3 +282,60 @@ def test_reference_distribution_is_sparse_and_normalized():
     rows = reference_distribution(torch.randn(5, 97).to(torch.bfloat16))
     for ids, p in rows:
         assert 1 <= len(ids) <= 20 and abs(p.sum() - 1) < 1e-12
+
+
+def test_replay_diagnostics_are_exact_and_handle_nan_shape_and_decisions():
+    expected = dict(visited=np.ones((2, 4), bool), decision=np.zeros((2, 4), bool),
+                    prob=np.array([[.1, .2, .3, .4], [np.nan]*4]), top1=np.array([3, 4]), gap=np.array([.2, .4]))
+    replay = {k: v.copy() for k, v in expected.items()}
+    assert capture.replay_differences(expected, replay) == {}
+    replay['prob'][0, 2] = np.nextafter(replay['prob'][0, 2], np.inf)
+    replay['decision'][0, 1] = True
+    replay['gap'][0] = np.nan
+    replay['top1'] = np.array([3])
+    diff = capture.replay_differences(expected, replay)
+    assert set(diff) == {'prob', 'decision', 'gap', 'top1'}
+    assert diff['prob']['count'] == 1 and diff['prob']['first_index'] == [0, 2]
+    assert 0 < diff['prob']['max_abs_finite_difference'] < 1e-15
+    assert diff['decision']['count'] == 1
+    assert diff['gap']['nonfinite_mismatches'] == 1
+    assert diff['top1']['actual_shape'] == [1]
+
+
+@needs_model
+def test_target_replays_free_oracle_and_keeps_strict_identity(tmp_path, monkeypatch):
+    from script.tah.validation.common import LogitDump, save_record, write_json
+    torch.set_num_threads(2)
+    monkeypatch.setattr(torch.cuda, '_lazy_init', lambda: pytest.fail('CPU replay test initialized CUDA'))
+    seq = dict(id='replay', prompt=[5, 9, 13, 21], forced=[40, 41, 42, 43, 44])
+    model = load_reference(MODEL, None, 'fp64', 'cpu')
+    runner = ReferenceRunner(model)
+    original = runner.run([seq], layout='chunk', chunk=3)[0].arrays()
+    oracle = tmp_path/'oracle'
+    write_json(oracle/'run.json', dict(config=dict(impl='reference', mode='free', layout='chunk', chunk=3)))
+    save_record(oracle, seq['id'], original)
+    target = capture.Target(oracle, 'cpu')
+    target.model = runner
+    calls = []
+    original_run = runner.run
+
+    def record(*args, **kwargs):
+        calls.append(kwargs.get('forced'))
+        return original_run(*args, **kwargs)
+    monkeypatch.setattr(runner, 'run', record)
+    arrays = {seq['id']: {k: v.copy() for k, v in original.items()}}
+    dump = LogitDump(tmp_path/'buffer', [seq], model.config.vocab_size, torch.float64)
+    try:
+        original_run([seq], layout='chunk', chunk=3,
+                     consumer=lambda s, indices, logits: dump.write(s['id'], indices, logits))
+        target.compare([seq], dump, arrays)
+        assert calls == [None]
+        assert np.array_equal(arrays[seq['id']]['sq'], np.zeros(len(seq['forced'])))
+        # Even one ULP must still fail. The repair changes replay mode, not its acceptance rule.
+        altered = {k: v.copy() for k, v in original.items()}
+        altered['prob'][0, 0] = np.nextafter(altered['prob'][0, 0], np.inf)
+        save_record(oracle, seq['id'], altered)
+        with pytest.raises(AssertionError, match='strict oracle replay failed.*prob'):
+            target.compare([seq], dump, arrays)
+    finally:
+        dump.close()
