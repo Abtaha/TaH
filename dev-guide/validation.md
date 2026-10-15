@@ -18,6 +18,7 @@ the tool. Run everything from the repository root with `source .venv-tah/bin/act
 | `analyze.py` | CLI: M1–M3, bias, no-large-error check, bootstrap ratios, oracle validity, secondary tables → `r1o1.json`, `r1o1.md`. |
 | `fp64_attention.py` | `fp64_attention_guard()`: float64 SDPA workaround for PyTorch #143644, applied by `ReferenceRunner` and the coupled oracle to every float64 run. |
 | `select_sequences.py` | CLI: deterministic sequence manifest from evaluation `samples.jsonl` files. |
+| `select_o1_manifest.py` | CLI: deterministic nested O1 manifest with stage-1, stage-2, validity and batch-1 subsets. |
 | `coupling.py` | `uniform(seed, index)`, `uniforms`, `inverse_cdf_draw`, `multinomial_patch` (R1-O2). |
 | `coupled_run.py` | Freeze harness prompts/seeds; resumable production engine, real reference b8, configurable oracle batch and shared harness grading. |
 | `coupled_analyze.py` | Paired C1 bootstrap, C2 TOST, trajectory identity/divergence and oracle CDF margins → `r1o2.json`, `r1o2.md`. |
@@ -56,6 +57,26 @@ The tests need `data/engine/fixture-models/tiny/` (`python -m tah.engine.generat
 
 After changing a runner, also rerun a small pilot on the GPU (below, `--subset first:16`)
 and check that forced engine replays still reproduce their forced tokens (an assertion).
+
+For changes to the chapter's saved R1-O evidence or analysis, use the CPU checks
+in [`report/1-engine/scripts/README.md`](../report/1-engine/scripts/README.md).
+`check.py` checks deterministic tables and the amended binding decisions;
+`check.py --r1o-sources` additionally compares every new table cell with its raw
+saved JSON source. No model run is needed to validate chapter curation.
+
+The saved nested O1 selection can be rebuilt from the recorded evaluation samples
+on CPU, then checked against the frozen manifest byte for byte:
+
+```bash
+CUDA_VISIBLE_DEVICES='' .venv-tah/bin/python -m script.tah.validation.select_o1_manifest \
+  --output data/tmp/report-1-engine/manifest.json
+CUDA_VISIBLE_DEVICES='' .venv-tah/bin/python -m pytest -q \
+  script/tah/validation/tests/test_select_o1_manifest.py \
+  --basetemp=data/tmp/report-1-engine/pytest
+```
+
+The check uses the saved evaluation samples and tokenizer; it skips when those
+large experiment inputs are absent from the checkout.
 
 ## Running R1-O1
 
@@ -105,8 +126,8 @@ widths 513–1023 not ≡ 31 (mod 32) over more than one row (`cunn_SoftMaxForwa
 reduces a negative `int` size modulo an unsigned block extent; fixed upstream in
 v2.7.0/v2.8.0). Float64 SDPA reaches it through the math kernel, so the
 unprotected float64 oracle has wrong attention. fp32/bf16/fp16 are not affected
-(they enter that kernel only above width 1024). `notes/tools/WP23/softmax_root_cause_probe.py`
-checks the trigger on the installed stack.
+(they enter that kernel only above width 1024). The saved source inventory and
+run metadata retain the original trigger diagnosis.
 
 Every float64 `ReferenceRunner.run` (oracle capture, target replay, diagnostics)
 and the float64 coupled oracle run inside `fp64_attention_guard()`. For an odd
